@@ -1,0 +1,18 @@
+# game data and anything derived from it never goes into the repository
+disc/
+gen/
+re/
+hd_textures/
+saves/
+c12.exe
+c12.ini
+# build + test output
+build/
+c12.log
+interp_entries.txt
+prims.txt
+shots*/
+vid/
+mods/*.dll
+*.bak
+*.obj

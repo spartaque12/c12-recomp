@@ -1,0 +1,20 @@
+{
+  "out": "gen",
+  "images": [
+    {
+      "name": "main",
+      "file": "disc/SCES_033.64",
+      "skip": 2048,
+      "base": "80010000",
+      "entries": [
+        "800a7ca0"
+      ],
+      "seeds": "seeds_main.txt",
+      "per_file": 200
+    }
+  ],
+  "overlays": {
+    "glob": "disc/RELOCS/*.LVB",
+    "per_file": 200
+  }
+}

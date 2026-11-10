@@ -1,0 +1,59 @@
+# C-12: Final Resistance - recompiled. F1 or Esc in game opens the settings menu.
+cue=C:path	oC-12 - Final Resistance (Europe).cue
+
+# --- video ---
+scale=5            # internal resolution multiplier
+widescreen=1       # 16:9 field of view
+hud_fix=1          # keep HUD/menus in proportion in widescreen
+pgxp=1             # sub-pixel vertex precision
+perspective=1      # perspective-correct texturing
+filter=0           # bilinear filtering of original textures
+hd_enabled=1       # use the HD texture pack
+hd_textures=hd_textures
+present_linear=1   # smooth (1) or sharp-pixel (0) scaling to the window
+vsync=0
+fullscreen=1
+width=1280
+height=720
+
+# --- speed ---
+cpu_bias=1.00       # 2.0 = original console CPU speed, lower = faster
+cd_fast=4          # loading speed multiplier
+interp=1           # frame interpolation: smooth 50 fps at correct game speed
+fps60=0            # EXPERIMENTAL 50 fps (game runs 2x fast)
+
+# --- audio ---
+volume=1.00
+audio_interp=3     # 0 nearest, 1 linear, 2 console-like, 3 cubic
+reverb=1
+audio_latency_ms=40
+
+# --- input ---
+mouse=1
+mouse_sens=1.00
+mouse_invert_x=0
+mouse_invert_y=0
+mouse_aim_invert=1
+mouse_direct_aim=1
+pause_in_menu=1
+# key bindings: Windows virtual-key codes, two per button (0 = none)
+bind_select=71,161
+bind_l3=0,0
+bind_r3=0,0
+bind_start=13,0
+bind_up=87,38
+bind_right=68,39
+bind_down=83,40
+bind_left=65,37
+bind_l2=67,0
+bind_r2=2,0
+bind_l1=81,0
+bind_r1=160,4
+bind_triangle=82,8
+bind_circle=70,0
+bind_cross=1,32
+bind_square=69,0
+
+# --- misc ---
+mods=mods
+log=1
