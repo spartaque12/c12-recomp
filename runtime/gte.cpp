@@ -105,6 +105,7 @@ static void mat_mul(Ctx* c, int mbase, int tbase, s32 v1, s32 v2, s32 v3, int sh
 
 float g_ws_scale = 1.0f;
 int g_ws_flags = 1;  // saturation flags as in the original 4:3 projection
+float g_fov_mult = 1.0f;   // field-of-view multiplier set by mods (1 = the game's own)
 float g_gte_h = 1.0f;   // current projection distance
 int g_ws_view = 0;   // experimental: expose squeezed view-space X to the game
 int g_pgxp_cull = 1; // winding test from precise coordinates
@@ -214,6 +215,7 @@ static void rtp(Ctx* c, int v, int sh, int lm, bool last) {
     D[18] = D[19];
     D[19] = lmD(c, (s32)(m[2] >> 12));
     u32 h = (u16)C[26];
+    if (g_fov_mult != 1.0f) { h = (u32)(h / g_fov_mult + 0.5f); if (h < 1) h = 1; if (h > 65535) h = 65535; }   // mods: field of view
     s64 q = gte_divide(c, h, (u32)D[19]);
     s32 ir1 = IR1;
     if (g_ws_scale != 1.0f) {

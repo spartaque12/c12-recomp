@@ -4,6 +4,9 @@
 #include <d3d11.h>
 #include "ui.h"
 #include "../third_party/imgui/imgui.h"
+int mods_ui_count();
+void mods_ui();
+void mods_save(FILE* f);
 #include "../third_party/imgui/imgui_impl_win32.h"
 #include "../third_party/imgui/imgui_impl_dx11.h"
 
@@ -93,6 +96,7 @@ void settings_save(const char* path) {
     fprintf(f, "# key bindings: Windows virtual-key codes, two per button (0 = none)\n");
     for (int i = 0; i < 16; i++) fprintf(f, "bind_%s=%d,%d\n", g_btn_key[i], c.binds[i][0], c.binds[i][1]);
     fprintf(f, "\n# --- misc ---\nmods=%s\nlog=%d\n", c.moddir.c_str(), g_log_level);
+    mods_save(f);
     fclose(f);
     ui_notify("settings saved");
 }
@@ -214,6 +218,10 @@ static void draw_menu() {
             if (ImGui::Checkbox("Pause the game while this menu is open", &b)) g_cfg.pause_in_menu = b;
             ImGui::Text("Frame %d   %.1f fps (window)", g_frame, io.Framerate);
             ImGui::TextDisabled("Saves: saves\\    Mods: %s\\", g_cfg.moddir.c_str());
+            ImGui::EndTabItem();
+        }
+        if (mods_ui_count() && ImGui::BeginTabItem("Mods")) {
+            mods_ui();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();

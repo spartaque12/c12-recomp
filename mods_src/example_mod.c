@@ -18,7 +18,7 @@ static void vsync_hook(uint32_t* r, C12OrigFn orig) {
 }
 
 __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
-    if (a->version != C12_MOD_API_VERSION) return 0;
+    if (a->version < 1) return 0;
     api = a;
     return api->hook(0x800a0fb0, vsync_hook);
 }

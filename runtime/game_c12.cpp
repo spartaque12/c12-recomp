@@ -226,14 +226,16 @@ extern float g_ws_scale;
 int g_ws_frustum = 1;
 static void hook_frustum_corners(Ctx* c, RecompFn orig) {
     orig(c);
-    if (!g_ws_frustum || g_ws_scale == 1.0f) return;
-    float k = 1.0f / g_ws_scale * 1.06f;   // a little margin: cells are tested by their corners
+    extern float g_fov_mult;
+    float kx = g_fov_mult, ky = g_fov_mult;   // a wider field of view (mods) widens the rays both ways
+    if (g_ws_frustum && g_ws_scale != 1.0f) kx *= 1.0f / g_ws_scale * 1.06f;   // a little margin: cells are tested by their corners
+    if (kx == 1.0f && ky == 1.0f) return;
     for (u32 a = 0x800f8b30; a < 0x800f8b30 + 32; a += 8) {
-        int x = (s16)mem_r16(c, a);
-        x = (int)(x * k);
-        if (x > 32767) x = 32767;
-        if (x < -32768) x = -32768;
+        int x = (int)((s16)mem_r16(c, a) * kx), y = (int)((s16)mem_r16(c, a + 2) * ky);
+        x = x > 32767 ? 32767 : x < -32768 ? -32768 : x;
+        y = y > 32767 ? 32767 : y < -32768 ? -32768 : y;
         mem_w16(c, a, (u32)(u16)(s16)x);
+        mem_w16(c, a + 2, (u32)(u16)(s16)y);
     }
 }
 

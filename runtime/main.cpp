@@ -64,6 +64,7 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k == "log") I(g_log_level);
     else if (k == "dump_textures") I(g_cfg.dump_textures);
     else if (k == "cd_fast") { extern int g_cd_fast; g_cd_fast = atoi(v.c_str()); }
+    else if (k.compare(0, 4, "mod.") == 0) { extern void mods_ini_value(const std::string& k, const std::string& v); mods_ini_value(k, v); }
 }
 
 static void load_ini(const char* path) {
