@@ -100,7 +100,7 @@ int g_hud_fix = 1;
 float g_near_cull = 0.0f;
 int g_near_plane_cull = 1;
 struct Box { int x0, y0, x1, y1; };
-struct Tf { float a, k, dy; };
+struct Tf { float a, k, dy, dx; };
 static bool g_collect;                 // pass 1: record boxes, draw nothing
 static std::vector<Box> g_boxes;
 static std::vector<Tf> g_tf;
@@ -142,12 +142,23 @@ static bool prim_2d(int x0, int y0, int x1, int y1, int is3d = 0) {
         g_st.xs_a = t.a;
         g_st.xs_k = t.k;
         g_st.ys = t.dy;
+        g_st.xs_dx = t.dx;
         g_st.xs_clip = g_sub_window;
     }
     return false;
 }
 
-static int g_scope_seen = -100;   // last frame that drew the scope's scan-line strips
+// the game's scope flags (800efdfc bit 0x400, or 800f0ca4 == 1), set now or within the last few frames
+static int g_scope_flag_frame = -100;
+static bool scope_flag_recent() {
+    u32 f;
+    s16 h;
+    memcpy(&f, g_ram + 0xefdfc, 4);
+    memcpy(&h, g_ram + 0xf0ca4, 2);
+    if ((f & 0x400) || h == 1) g_scope_flag_frame = g_frame;
+    return g_frame - g_scope_flag_frame <= 8;
+}
+static int g_scope_seen = -100;   // last frame that drew the scope's scan-line strips (drawn before the HUD in the same frame, so "<= 1" means "this frame")
 int g_scope_overlay = 1;          // 0 = mods asked for the scope view without its overlay
 static void layout_2d(float k) {
     size_t n = g_boxes.size();
@@ -257,12 +268,16 @@ static void layout_2d(float k) {
     // The scope view draws the HUD inside its letterbox: health bar 18 lower, weapon box 16 higher, its
     // info box at the top right just under the bar. Without the letterbox (scope_overlay = 0) they go
     // back to their normal places and the info box up to the health bar's height.
-    if (!g_scope_overlay && g_frame - g_scope_seen <= 4) {
+    if (!g_scope_overlay && g_frame - g_scope_seen <= 1) {
         for (size_t i = 0; i < n; i++) {
             if (find((int)i) != (int)i || g_box3d[i]) continue;
             int y0 = gb[i].y0 - scr_t, y1 = gb[i].y1 - scr_t;
             if (gb[i].x1 - gb[i].x0 >= W - 32) continue;          // full-width pieces stay
-            if (y1 <= 70) gt[i].dy = -18.0f;
+            // each piece is snapped to its normal spot (also in the game's exit transition, where the
+            // weapon box is drawn part-way between its scope and normal places)
+            int x0 = gb[i].x0 - L;
+            if (y0 >= 28 && y1 <= 70) gt[i].dy = (float)(24 - y0);                 // health bar, info box: top row
+            else if (y0 >= 150 && x0 < 120) { gt[i].dy = (float)(200 - y0); gt[i].dx = (float)(24 - x0); }   // weapon box
             else if (y0 >= 160) gt[i].dy = 16.0f;
         }
     }
@@ -417,7 +432,8 @@ static void draw_polygon() {
         for (int k = 1; k < n; k++) { x0 = std::min(x0, v[k].x); x1 = std::max(x1, v[k].x); y0 = std::min(y0, v[k].y); y1 = std::max(y1, v[k].y); }
         // in the world list only the front-most slots can hold a 2D panel; everything behind is the scene
         if (prim_2d(x0, y0, x1, y1, pg_kind != 0 ? 1 : (g_list_3d && g_ot_index < g_ot_slots_cur - 8) ? 2 : 0)) return;
-        if (g_st.ys != 0.0f) for (int k = 0; k < n; k++) { v[k].y += (int)g_st.ys; v[k].py += g_st.ys; }
+        if (g_st.ys != 0.0f || g_st.xs_dx != 0.0f)
+            for (int k = 0; k < n; k++) { v[k].y += (int)g_st.ys; v[k].py += g_st.ys; v[k].x += (int)g_st.xs_dx; v[k].px += g_st.xs_dx; }
     }
     if (g_dbg_file) {
         fprintf(g_dbg_file, "poly %02x ot %d pgxp %d tp %d,%d semi %d:", cmd, g_ot_index, pg_kind, g_st.tpx, g_st.tpy, (int)g_st.semi);
@@ -461,14 +477,19 @@ static void draw_rect() {
     g_st.dither = false;
     if (prim_2d(x, y, x + w, y + h)) return;
     y += (int)g_st.ys;
+    x += (int)g_st.xs_dx;
     if (g_dbg_file) { fprintf(g_dbg_file, "rect %02x ot %d: %d,%d %dx%d uv %d,%d tp %d,%d", cmd, g_ot_index, x, y, w, h, uv & 0xFF, (uv >> 8) & 0xFF, g_st.tpx, g_st.tpy); fputc(10, g_dbg_file); }
     if (!g_scope_overlay && g_list_3d) {
         // The scope view's scan lines are 256x1 strips that re-draw every other line from the frame
         // buffer itself; its green tint is one translucent flat rectangle over the whole picture.
         // The black bars above and below are two opaque 512x32 rectangles.
+        // The bars come first in the frame, so they mark the frame as a scope frame - also the exit
+        // transition frames that still have the letterbox but no scan lines - as long as the game's
+        // scope flag is (or was a moment ago) set, which keeps cutscene letterboxes out of it.
+        bool scope_now = scope_flag_recent();
         if (tex && h == 1 && w == 256 && g_st.depth == 2) { g_scope_seen = g_frame; return; }
-        if (!tex && (cmd & 2) && w >= 500 && h >= 150 && g_frame - g_scope_seen <= 4) return;
-        if (!tex && !(cmd & 2) && w >= 500 && h == 32 && g_frame - g_scope_seen <= 4) return;
+        if (!tex && !(cmd & 2) && w >= 500 && h == 32 && (scope_now || g_frame - g_scope_seen <= 1)) { g_scope_seen = g_frame; return; }
+        if (!tex && (cmd & 2) && w >= 500 && h >= 150 && g_frame - g_scope_seen <= 1) return;
     }
     g_be->rect(x, y, w, h, uv & 0xFF, (uv >> 8) & 0xFF, g_fifo[0] & 0xFFFFFF, g_st);
 }
@@ -487,15 +508,16 @@ static void draw_line_seg(const GpuVtx& a, const GpuVtx& b, bool gouraud, bool s
         if (r > 40 && r > gc * 2 && r > bc * 2) return;
     }
     // The scope view's rounded corners are drawn as lines in the front-most slots of the world list.
-    if (!g_scope_overlay && g_list_3d && g_ot_index >= 1015 && g_frame - g_scope_seen <= 4) return;
+    if (!g_scope_overlay && g_list_3d && g_ot_index >= 1015 && g_frame - g_scope_seen <= 1) return;
     g_st.textured = false;
     g_st.raw = false;
     g_st.semi = semi;
     g_st.gouraud = gouraud;
     g_st.dither = (g_stat & 0x200) != 0;
-    if (g_st.ys != 0.0f) {
+    if (g_st.ys != 0.0f || g_st.xs_dx != 0.0f) {
         GpuVtx a2 = a, b2 = b;
         a2.y += (int)g_st.ys; a2.py += g_st.ys; b2.y += (int)g_st.ys; b2.py += g_st.ys;
+        a2.x += (int)g_st.xs_dx; a2.px += g_st.xs_dx; b2.x += (int)g_st.xs_dx; b2.px += g_st.xs_dx;
         g_be->line(a2, b2, g_st);
         return;
     }
@@ -809,6 +831,7 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
         g_st.xs_a = 0;
         g_st.xs_k = 1;
         g_st.ys = 0;
+        g_st.xs_dx = 0;
         g_st.xs_clip = 0;
         g_ot_slots = slots;
         if (g_log_level >= 3 && (g_frame % 100) < 2) logf("frame %d list @%06x: %d slots%s\n", g_frame, madr & 0x1FFFFF, slots, is2d ? " (2D)" : "");

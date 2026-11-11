@@ -277,6 +277,7 @@ static void begin_prim(const GpuState& s, int kind, int need, int bx1, int by1, 
     if (rep_srv != cur_rep) { flush(); cur_rep = rep_srv; }
     // a small clip window (scrolling text inside a box) moves with the widescreen HUD layout
     int cx1 = s.cx1, cx2 = s.cx2, cy1 = s.cy1, cy2 = s.cy2;
+    if (s.xs_clip && s.xs_dx != 0.0f) { cx1 += (int)s.xs_dx; cx2 += (int)s.xs_dx; }
     if (s.xs_k != 1.0f && s.xs_clip) {
         cx1 = (int)floorf(s.xs_a + (cx1 - s.xs_a) * s.xs_k);
         cx2 = (int)ceilf(s.xs_a + (cx2 + 1 - s.xs_a) * s.xs_k) - 1;

@@ -23,6 +23,7 @@ struct GpuState {
     bool set_mask, check_mask;
     // 2D layout correction (widescreen HUD): x2 = xs_a + (x - xs_a) * xs_k
     float xs_a = 0.0f, xs_k = 1.0f;
+    float xs_dx = 0.0f;   // horizontal nudge of a laid-out 2D element, before xs_a/xs_k (applied like ys)
     float ys = 0.0f;   // vertical shift of a laid-out 2D element (already applied to its vertices; the clip window follows when xs_clip)
 };
 
