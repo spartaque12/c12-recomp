@@ -24,6 +24,7 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k == "mouse_aim_invert") I(g_cfg.mouse_aim_invert);
     else if (k == "mouse_direct_aim") I(g_cfg.mouse_direct_aim);
     else if (k == "mouse_direct_cam") I(g_cfg.mouse_direct_cam);
+    else if (k == "cam_autocenter") I(g_cfg.cam_autocenter);
     else if (k == "pause_in_menu") I(g_cfg.pause_in_menu);
     else if (k.rfind("bind_", 0) == 0) {
         for (int b = 0; b < 16; b++)

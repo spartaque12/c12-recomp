@@ -262,9 +262,43 @@ static void hook_cam_stick(Ctx* c, RecompFn orig) {
     g_cam_mx = g_cam_my = 0;
     int ix = (int)fx, iy = (int)fy;
     fx -= ix; fy -= iy;
+    if (g_cam_log >= 2) {
+        auto v3 = [&](u32 o, int* p) { for (int i = 0; i < 3; i++) p[i] = (s16)mem_r16(c, cam + o + i * 2); };
+        int e[3], t[3], a[3], f[3];
+        v3(0xe4, e); v3(0x104, t); v3(0xa4, a); v3(0xf4, f);
+        logf("camv e4 %d,%d,%d  104 %d,%d,%d  a4 %d,%d,%d  f4 %d,%d,%d  d38 %d d6c %d\n", e[0], e[1], e[2], t[0], t[1], t[2], a[0], a[1], a[2], f[0], f[1], f[2], (s16)mem_r16(c, cam + 0x38), (s16)mem_r16(c, cam + 0x6c));
+    }
     if (g_cam_log) logf("cam %08x mode %d pitch %d yaw %d  target %d %d flags %08x\n", cam, mem_r8(c, cam + 0x77), (s16)mem_r16(c, cam + 0x20), (s16)mem_r16(c, cam + 0x22), (s16)mem_r16(c, cam + 0x2c), (s16)mem_r16(c, cam + 0x2e), mem_r32(c, cam + 0x18));
     if (!g_cfg.mouse_direct_cam) ix = iy = 0;
     u32 fl = mem_r32(c, cam + 0x18);
+    if (!g_cfg.cam_autocenter) {
+        // Auto-centre off: the view the player chose is held by giving it as the target every frame
+        static bool valid;
+        static int sp, sy, last = -100;
+        if (g_frame - last > 8) valid = false;   // camera was elsewhere (first-person view, cutscene, loading)
+        last = g_frame;
+        // A wall behind the fixed direction squeezes the camera into the hero (cam+0x38 = current
+        // distance, cam+0x6c = wanted distance). While squeezed the game's own follow takes over and
+        // swings the camera into free space; the direction it ends up with is held from then on.
+        static bool squeezed;
+        int dist = (s16)mem_r16(c, cam + 0x38), want = (s16)mem_r16(c, cam + 0x6c);
+        if (want > 0) {
+            if (dist * 100 < want * 45) squeezed = true;
+            else if (dist * 100 > want * 75) squeezed = false;
+        }
+        if (squeezed && !ix && !iy && mem_r16(c, cam + 0x2c) == 0xffff && mem_r16(c, cam + 0x2e) == 0xffff) { valid = false; return; }
+        if (!valid) { sp = ((s16)mem_r16(c, cam + 0x20) + 0x400) & 0xfff; sy = mem_r16(c, cam + 0x22) & 0xfff; valid = true; }
+        if (mem_r16(c, cam + 0x2c) != 0xffff) sp = (mem_r16(c, cam + 0x2c) + 0x400) & 0xfff;   // pad stick moved it
+        if (mem_r16(c, cam + 0x2e) != 0xffff) sy = mem_r16(c, cam + 0x2e) & 0xfff;
+        sp -= iy;
+        if (sp < 0x20) sp = 0x20;
+        if (sp > 0x7e0) sp = 0x7e0;
+        sy = (sy + ix) & 0xfff;
+        mem_w16(c, cam + 0x2c, (u32)((sp - 0x400) & 0xfff));
+        mem_w16(c, cam + 0x2e, (u32)sy);
+        mem_w32(c, cam + 0x18, (fl | 0x1800) & ~4u);
+        return;
+    }
     if (!ix && !iy) return;
     if (iy) {
         int p = (((s16)mem_r16(c, cam + 0x20) + 0x400) & 0xfff) - iy;

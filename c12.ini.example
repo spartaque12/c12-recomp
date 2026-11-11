@@ -36,6 +36,7 @@ mouse_invert_y=0
 mouse_aim_invert=1
 mouse_direct_aim=1
 mouse_direct_cam=1
+cam_autocenter=1     # 0 = the camera keeps the direction you chose
 pause_in_menu=1
 # key bindings: Windows virtual-key codes, two per button (0 = none)
 bind_select=71,161

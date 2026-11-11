@@ -44,6 +44,7 @@ struct Config {
     float mouse_sens = 1.0f;
     int mouse_invert_y = 0;
     int mouse_invert_x = 0;
+    int cam_autocenter = 1;     // 0 = the camera keeps the direction the player chose
     int mouse_direct_cam = 1;   // third-person view: mouse turns the game's camera directly (no stick emulation)
     int mouse_direct_aim = 1;   // first-person view: mouse writes the game's view angles directly
     int mouse_aim_invert = 0;   // invert vertical aim in first-person view
