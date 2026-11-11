@@ -186,6 +186,14 @@ static void apply(void) {
     /* The view object records the camera that drives it (+4). In cutscenes another camera does:
      * then the mod steps aside and the cutscene plays as made. */
     int cutscene = is_ptr(vo) && (uint32_t)r32(vo + 4) != cam;
+    /* Menus opened in play (inventory, giving an item to someone) draw their item icons as 3D models
+     * placed in front of the game's camera, and wait for them to settle before taking input: the
+     * game's own camera is kept while one is open. They switch the player's controls off
+     * (*(hero+0xbc)+0x108 bit 0x40; the inventory also sets 800efdfc bit 0x80). */
+    if (!cutscene && is_ptr(hero)) {
+        uint32_t st = (uint32_t)r32(hero + 0xbc);
+        if ((r32(0x800efdfc) & 0x80) || (is_ptr(st) && (r16(st + 0x108) & 0x40))) cutscene = 1;
+    }
     if (enabled && scope && !cutscene) {
         if (!in_scope) {
             /* entering the scope: it looks where the first-person view looked (its yaw at 800f0ca8 uses
