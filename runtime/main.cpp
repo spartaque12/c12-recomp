@@ -37,6 +37,8 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k == "ws_frustum") { extern int g_ws_frustum; g_ws_frustum = atoi(v.c_str()); }
     else if (k == "shot_from") { extern int g_shot_from; g_shot_from = atoi(v.c_str()); }
     else if (k == "ws_flags") { extern int g_ws_flags; g_ws_flags = atoi(v.c_str()); }
+    else if (k == "aim_fix") { extern int g_aim_fix; g_aim_fix = atoi(v.c_str()); }
+    else if (k == "trace_fn") { extern u32 g_trace_fn; g_trace_fn = strtoul(v.c_str(), nullptr, 16); }
     else if (k == "dbg_skip") { extern int g_dbg_skip; g_dbg_skip = atoi(v.c_str()); }
     else if (k == "cam_log") { extern int g_cam_log; g_cam_log = atoi(v.c_str()); }
     else if (k == "near_plane_cull") { extern int g_near_plane_cull; g_near_plane_cull = atoi(v.c_str()); }

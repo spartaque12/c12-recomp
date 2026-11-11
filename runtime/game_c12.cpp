@@ -9,6 +9,7 @@
 #include <windows.h>
 #include "psx.h"
 #include <unordered_map>
+#include <math.h>
 
 #define G_FIBRE_BASE 0x800cb670u   // sp of the frame that started/resumed the running fibre
 #define G_FIBRE_CUR 0x800ef4c4u    // running fibre struct
@@ -310,7 +311,68 @@ static void hook_cam_stick(Ctx* c, RecompFn orig) {
     mem_w32(c, cam + 0x18, fl & ~4u);
 }
 
+// ---- shots go to the crosshair ---------------------------------------------------------------------
+// 80073474 / 80073804 fire the hero's guns. The weapon object is in the global at 800efdc8; its world
+// MATRIX at +0x14 (rotation s16, 4096 = 1.0; position s32 at +0x28) comes from the hand animation.
+// The shot is traced from the muzzle (the matrix applied to the local point at *(obj+0xbc)+0) along
+// the matrix's third column, for the gun's range (squared, at *(obj+0xbc)+0x50); the end point (the
+// hit, or the end of the range) is left at *(obj+0xbc)+0x38. The muzzle flash and the tracer are drawn
+// afterwards from the model's own matrix, so they stay with the visible gun.
+// In the game's scope view the gun already fires through the crosshair. In a mod's first-person view
+// (game_option "aim_to_view") the gun is beside the eye, so for the duration of the call the matrix is
+// replaced by the camera's (view object 800f0110: rotation at +0x0c, rows = (right, down, forward)
+// components; eye s32 at +0x20) placed so that the muzzle sits on the eye: the trace then runs exactly
+// through the centre of the screen.
+int g_aim_fix = 1;   // debug switch (aim_fix=0 disables)
+int g_aim_to_view;   // set by mods while their own first-person view is active
+static void log_shot(Ctx* c, u32 obj, const char* tag) {
+    if (g_log_level < 3) return;
+    u32 st = mem_r32(c, obj + 0xbc);
+    if ((st >> 24) != 0x80) return;
+    double e[3], f[3], p[3], d = 0, t = 0;
+    for (int i = 0; i < 3; i++) { e[i] = (s32)mem_r32(c, 0x800f0110 + 0x20 + i * 4); f[i] = (s16)mem_r16(c, 0x800f0110 + 0x0c + i * 6 + 4) / 4096.0; p[i] = (s16)mem_r16(c, st + 0x38 + i * 2); t += (p[i] - e[i]) * f[i]; }
+    for (int i = 0; i < 3; i++) { double q = p[i] - (e[i] + f[i] * t); d += q * q; }
+    logf("shot %s frame %d: end %.0f,%.0f,%.0f  %.0f along the view, %.1f off the centre line\n", tag, g_frame, p[0], p[1], p[2], t, sqrt(d));
+}
+static void hook_fire(Ctx* c, RecompFn orig) {
+    u32 obj = mem_r32(c, 0x800efdc8);
+    bool scope = (mem_r32(c, 0x800efdfc) & 0x400) || (s16)mem_r16(c, 0x800f0ca4) == 1;
+    u32 st = (obj >> 24) == 0x80 ? mem_r32(c, obj + 0xbc) : 0;
+    if (!g_aim_to_view || scope || !g_aim_fix || (st >> 24) != 0x80) { orig(c); if (st) log_shot(c, obj, "(game)"); return; }
+    const u32 vo = 0x800f0110;
+    u16 rot[9];
+    u32 pos[3];
+    for (int i = 0; i < 9; i++) rot[i] = (u16)mem_r16(c, obj + 0x14 + i * 2);
+    for (int i = 0; i < 3; i++) pos[i] = mem_r32(c, obj + 0x28 + i * 4);
+    double m[9], off[3];
+    for (int i = 0; i < 9; i++) { m[i] = (s16)mem_r16(c, vo + 0x0c + i * 2) / 4096.0; mem_w16(c, obj + 0x14 + i * 2, mem_r16(c, vo + 0x0c + i * 2)); }
+    for (int k = 0; k < 3; k++) off[k] = (s16)mem_r16(c, st + k * 2);   // muzzle, in the gun's own space
+    for (int i = 0; i < 3; i++) {
+        double eye = (s32)mem_r32(c, vo + 0x20 + i * 4);
+        double mo = m[i * 3 + 0] * off[0] + m[i * 3 + 1] * off[1] + m[i * 3 + 2] * off[2];
+        mem_w32(c, obj + 0x28 + i * 4, (u32)(s32)lround(eye - mo));
+    }
+    orig(c);
+    log_shot(c, obj, "(aimed)");
+    if (mem_r32(c, 0x800efdc8) == obj) {
+        for (int i = 0; i < 9; i++) mem_w16(c, obj + 0x14 + i * 2, rot[i]);
+        for (int i = 0; i < 3; i++) mem_w32(c, obj + 0x28 + i * 4, pos[i]);
+    }
+}
+
+// debug: --trace_fn ADDR logs every call of a main-image function with a0..a3 and the guest call stack
+u32 g_trace_fn;
+static void hook_trace(Ctx* c, RecompFn orig) {
+    logf("trace %08x frame %d a0=%08x a1=%08x a2=%08x a3=%08x ra=%08x stack:", g_trace_fn, g_frame, c->r[4], c->r[5], c->r[6], c->r[7], c->r[31]);
+    for (int i = g_cs_n - 1, k = 0; i >= 0 && k < 10; i--, k++) logf(" %08x", g_cs[i & 4095]);
+    logf("\n");
+    orig(c);
+}
+
 void game_init() {
+    hook_set(0x80073474, hook_fire);
+    hook_set(0x80073804, hook_fire);
+    if (g_trace_fn) hook_set(g_trace_fn, hook_trace);
     hook_set(0x80015b50, hook_cam_stick);
     hook_set(0x80065db8, hook_frustum_corners);
     hook_set(0x800612b8, hook_relocate);

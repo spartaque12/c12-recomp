@@ -10,7 +10,8 @@
  *                   that drives the picture - in cutscenes it is not the hero's). cam+0x40 -> view object: camera-to-world rotation (3x3 s16,
  *                   4096 = 1.0, columns = right / down / forward) at +0x0c, eye position (3 x s32)
  *                   at +0x20.
- *   800f1338        1 while the game's own scope view (R2) is active.
+ *   800efdfc        bit 0x400 while the game's own scope view (R2) is open (800f0ca4 = 1 then too;
+ *                   800f1338 = 1 only in some places).
  *   80065494        draws the world.
  *   800efdb8        pointer to the hero object. An object carries a world MATRIX at +0x14 (rotation
  *                   3x3 s16, position 3 x s32 at +0x28; the hero's position is at his feet and y
@@ -67,6 +68,7 @@ static int16_t r16(uint32_t a) { int16_t v; memcpy(&v, api->ram + (a & 0x1FFFFF)
 static int32_t r32(uint32_t a) { int32_t v; memcpy(&v, api->ram + (a & 0x1FFFFF), 4); return v; }
 static void w16(uint32_t a, int v) { int16_t s = (int16_t)v; memcpy(api->ram + (a & 0x1FFFFF), &s, 2); }
 static void w32(uint32_t a, int32_t v) { memcpy(api->ram + (a & 0x1FFFFF), &v, 4); }
+static int scope_open(void) { return (r32(0x800efdfc) & 0x400) || r16(0x800f0ca4) == 1 || r32(0x800f1338) == 1; }
 static int is_ptr(uint32_t p) { return p >= 0x80010000u && p < 0x80200000u && (p & 3) == 0; }
 
 /* an object's model instance, or 0 */
@@ -98,6 +100,7 @@ static void restore(uint32_t hero, int scope) {
     if (!was_on) return;
     if (is_ptr(hero) && !scope) set_hidden(hero, 0);
     api->set_fov(1.0f);
+    api->game_option("aim_to_view", 0);
     if (saved_autocenter >= 0) { api->game_option("cam_autocenter", saved_autocenter); saved_autocenter = -1; }
     was_on = 0;
     vm_ok = 0;
@@ -110,7 +113,7 @@ static void apply(void) {
     if (!is_ptr(cam)) return;
     uint32_t hero = (uint32_t)r32(0x800efdb8);
     uint32_t vo = (uint32_t)r32(cam + 0x40);
-    int scope = r32(0x800f1338) == 1;   /* the game's own scope view is active */
+    int scope = scope_open();
     /* The view object records the camera that drives it (+4). In cutscenes another camera does:
      * then the mod steps aside and the cutscene plays as made. */
     int cutscene = is_ptr(vo) && (uint32_t)r32(vo + 4) != cam;
@@ -149,6 +152,7 @@ static void apply(void) {
         w16(hero + 0x14 + 16, (int)(c * 4096.0f));   /* m22 */
     }
     api->set_fov(fov);
+    api->game_option("aim_to_view", 1);   /* shots go to the centre of the screen */
     vm_ok = 1;
 }
 
@@ -188,7 +192,7 @@ static void camera_hook(uint32_t* r, C12OrigFn orig) {
     /* the game updates more than one camera per frame; only the one that follows the hero is ours */
     if (!is_ptr(hero) || !is_ptr(vo) || (uint32_t)r32(cam + 0x44) != hero + 0x14) { orig(r); return; }
     g_cam = cam;
-    int active = enabled && direct_look && r32(0x800f1338) != 1 && (uint32_t)r32(vo + 4) == cam;
+    int active = enabled && direct_look && !scope_open() && (uint32_t)r32(vo + 4) == cam;
     if (active) {
         if (!look_valid) {
             look_yaw = (float)(r16(cam + 0x22) & 0xfff);
