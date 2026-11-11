@@ -188,6 +188,20 @@ static void layout_2d(float k) {
             if (cx >= gb[j].x0 && cx <= gb[j].x1 && cy >= gb[j].y0 && cy <= gb[j].y1) { gt[i] = gt[j]; break; }
         }
     }
+    // A small element lying inside a larger one is part of that picture (a detached room of the map,
+    // an icon inside a text block), not a free-standing marker: it moves with what surrounds it.
+    auto is_small = [&](const Box& b) { return b.x1 - b.x0 <= 120 && b.y1 - b.y0 <= 60; };
+    for (size_t i = 0; i < n; i++) {
+        if (find((int)i) != (int)i || !is_small(gb[i])) continue;
+        int cx = (gb[i].x0 + gb[i].x1) / 2, cy = (gb[i].y0 + gb[i].y1) / 2;
+        long best = -1;
+        for (size_t j = 0; j < n; j++) {
+            if (j == i || find((int)j) != (int)j || is_small(gb[j]) || gt[j].k == 1.0f) continue;
+            if (cx < gb[j].x0 || cx > gb[j].x1 || cy < gb[j].y0 || cy > gb[j].y1) continue;
+            long area = (long)(gb[j].x1 - gb[j].x0) * (gb[j].y1 - gb[j].y0);
+            if (best < 0 || area < best) { best = area; gt[i] = gt[j]; }
+        }
+    }
     for (size_t i = 0; i < n; i++) g_tf[i] = gt[find((int)i)];
     if (g_log_level >= 3 && (g_frame % 100) == 0)
         for (size_t i = 0; i < n; i++) if (find((int)i) == (int)i)
