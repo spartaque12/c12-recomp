@@ -125,7 +125,11 @@ POut ps_prim(VOut i) {
         if (depth == 2 && i.fl.y == 0) {
             // direct-colour texture: sample the upscaled VRAM at full resolution
             float2 p = (float2(i.tp.xy) + uvf) * scale;
-            t = vram.Load(int3(int2(p) & int2(1024 * iscale - 1, 512 * iscale - 1), 0));
+            // wrap with a modulo: a bit mask is only right for power-of-two scales (3x, 5x, 6x... tiled garbage)
+            int2 ip = int2(p);
+            int2 sz = int2(1024 * iscale, 512 * iscale);
+            ip = ((ip % sz) + sz) % sz;
+            t = vram.Load(int3(ip, 0));
             if (dot(t, float4(1, 1, 1, 1)) == 0.0) discard;
         } else if (filt != 0) {
             float2 f = uvf - 0.5;
