@@ -338,6 +338,11 @@ void spu_write(u32 addr, u32 val) {
             if (bits & (1u << i)) {
                 Voice& vc = g_v[i];
                 vc.addr = (u32)g_reg[(i * 16 + 6) >> 1] << 3;
+                if (g_log_level >= 4) {
+                    logf("spu: key on voice %d sample %05x pitch %04x frame %d stack:", i, vc.addr, g_reg[(i * 16 + 4) >> 1], g_frame);
+                    for (int s = g_cs_n - 1, k = 0; s >= 0 && k < 8; s--, k++) logf(" %08x", g_cs[s & 4095]);
+                    logf("\n");
+                }
                 vc.repeat = vc.addr;
                 vc.counter = 0;
                 vc.pos = 28;

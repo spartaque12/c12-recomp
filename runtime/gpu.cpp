@@ -412,6 +412,7 @@ static void draw_polygon() {
     if (quad && (keep_big || !oversize(v + 1))) g_be->tri(v + 1, g_st);
 }
 
+int g_scope_overlay = 1;   // 0 = mods asked for the scope view without scan lines and tint
 static void draw_rect() {
     u32 cmd = g_fifo[0] >> 24;
     bool tex = cmd & 4;
@@ -433,6 +434,13 @@ static void draw_rect() {
     g_st.dither = false;
     if (prim_2d(x, y, x + w, y + h)) return;
     if (g_dbg_file) { fprintf(g_dbg_file, "rect %02x ot %d: %d,%d %dx%d uv %d,%d tp %d,%d", cmd, g_ot_index, x, y, w, h, uv & 0xFF, (uv >> 8) & 0xFF, g_st.tpx, g_st.tpy); fputc(10, g_dbg_file); }
+    if (!g_scope_overlay && g_list_3d) {
+        // The scope view's scan lines are 256x1 strips that re-draw every other line from the frame
+        // buffer itself; its green tint is one translucent flat rectangle over the whole picture.
+        static int seen = -100;
+        if (tex && h == 1 && w == 256 && g_st.depth == 2) { seen = g_frame; return; }
+        if (!tex && (cmd & 2) && w >= 500 && h >= 150 && g_frame - seen <= 4) return;
+    }
     g_be->rect(x, y, w, h, uv & 0xFF, (uv >> 8) & 0xFF, g_fifo[0] & 0xFFFFFF, g_st);
 }
 

@@ -56,7 +56,8 @@ C = L2, Enter = Start, G = Select. XInput pads work at the same time (analog sti
   Build all mods with `mods_src\build_mods.ps1`.
 * `mods_src\first_person.c` — first-person view mod: the eye sits at the hero's head while the normal
   third-person controls keep working; hides the body, draws the weapon as an adjustable view model,
-  adjustable field of view. The game's own scope view (R2) is unchanged.
+  optionally strips the scan lines, tint and hum from the scope view (R2),
+  adjustable field of view.
 * HD textures: DuckStation `texupload-*.png` packs in the `hd_textures=` folder.
 
 ## Known limitations

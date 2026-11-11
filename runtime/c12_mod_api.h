@@ -50,7 +50,8 @@ typedef struct C12ModApi {
     void (*set_fov)(float multiplier);
     /* Change one of the runtime's own options for as long as the mod needs it; returns the previous
      * value (-1 = unknown key) so the mod can put it back. Keys: "cam_autocenter" (0/1),
-     * "mouse_direct_cam" (0/1), "interp" (0/1). */
+     * "mouse_direct_cam" (0/1), "interp" (0/1), "scope_overlay" (0 = draw the game's scope view
+     * without its scan lines and green tint). */
     int (*game_option)(const char* key, int value);
 } C12ModApi;
 

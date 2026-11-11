@@ -7,12 +7,14 @@ if (-not $env:VSCMD_VER) {
         if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "env:$($matches[1])" -Value $matches[2] }
     }
 }
-New-Item -ItemType Directory -Force "$root\mods" | Out-Null
+# C12_MODS_OUT: build somewhere else (a running game keeps its loaded mod DLLs locked)
+$outdir = if ($env:C12_MODS_OUT) { $env:C12_MODS_OUT } else { "$root\mods" }
+New-Item -ItemType Directory -Force $outdir | Out-Null
 New-Item -ItemType Directory -Force "$root\build\mods" | Out-Null
 $only = $args
 Get-ChildItem "$PSScriptRoot\*.c" | ForEach-Object {
     if ($only.Count -and ($only -notcontains $_.BaseName)) { return }
-    $out = "$root\mods\$($_.BaseName).dll"
+    $out = "$outdir\$($_.BaseName).dll"
     & cl /nologo /LD /O2 /W3 "/I$root\runtime" $_.FullName "/Fo$root\build\mods\$($_.BaseName).obj" "/Fe$out" /link "/IMPLIB:$root\build\mods\$($_.BaseName).lib" | Out-Host
     if ($LASTEXITCODE) { exit 1 }
     Write-Host "built $out"

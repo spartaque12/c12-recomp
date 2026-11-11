@@ -51,9 +51,10 @@ static void api_setting_float(const char* key, const char* label, float* value, 
     if (it != g_mod_ini.end()) *value = (float)atof(it->second.c_str());
 }
 static void api_set_fov(float m) { g_fov_mult = m < 0.3f ? 0.3f : m > 3.0f ? 3.0f : m; }
+extern int g_scope_overlay;
 static int api_game_option(const char* key, int value) {
     int* p = !key ? nullptr : !strcmp(key, "cam_autocenter") ? &g_cfg.cam_autocenter : !strcmp(key, "mouse_direct_cam") ? &g_cfg.mouse_direct_cam :
-             !strcmp(key, "interp") ? &g_cfg.interp : nullptr;
+             !strcmp(key, "interp") ? &g_cfg.interp : !strcmp(key, "scope_overlay") ? &g_scope_overlay : nullptr;
     if (!p) return -1;
     int prev = *p;
     *p = value;

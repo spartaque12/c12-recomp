@@ -8,7 +8,8 @@
  * What the mod knows about the game (European release, SCES-03364):
  *   80018320(cam)   camera update. cam+0x40 -> view object: camera-to-world rotation (3x3 s16,
  *                   4096 = 1.0, columns = right / down / forward) at +0x0c, eye position (3 x s32)
- *                   at +0x20. cam+0x77 = camera mode, 4 = the game's own scope view.
+ *                   at +0x20.
+ *   800f1338        1 while the game's own scope view (R2) is active.
  *   80065494        draws the world.
  *   800efdb8        pointer to the hero object. An object carries a world MATRIX at +0x14 (rotation
  *                   3x3 s16, position 3 x s32 at +0x28; the hero's position is at his feet and y
@@ -34,6 +35,7 @@ static float eye_up = 300.0f;      /* eye height above the feet, game units (the
 static float eye_fwd = 0.0f;
 static int hide_body = 1;
 static int strafe = 1;             /* keep the view direction while moving (camera auto-centre off) */
+static int clean_scope = 1;        /* the game's own scope view (R2) without its overlay and sound */
 static int viewmodel = 1;          /* draw the weapon at a fixed place in front of the eye */
 static float vm_right = 60.0f, vm_down = 70.0f, vm_fwd = 170.0f;
 static float vm_yaw = 0.0f, vm_pitch = 0.0f;   /* degrees */
@@ -91,7 +93,7 @@ static void apply(void) {
     if (!is_ptr(cam)) return;
     uint32_t hero = (uint32_t)r32(0x800efdb8);
     uint32_t vo = (uint32_t)r32(cam + 0x40);
-    int scope = api->ram[(cam + 0x77) & 0x1FFFFF] == 4;
+    int scope = r32(0x800f1338) == 1;   /* the game's own scope view is active */
     if (!enabled || !is_ptr(hero) || !is_ptr(vo) || scope) { restore(hero, scope); return; }
     if (!was_on) saved_autocenter = -1;
     was_on = 1;
@@ -141,6 +143,7 @@ static void camera_hook(uint32_t* r, C12OrigFn orig) {
 }
 
 static void draw_hook(uint32_t* r, C12OrigFn orig) {
+    api->game_option("scope_overlay", enabled && clean_scope ? 0 : 1);
     apply();
     orig(r);
 }
@@ -152,6 +155,13 @@ static void weapon_hook(uint32_t* r, C12OrigFn orig) {
         place_weapon(cur);
 }
 
+/* 8005f380(desc, ...) queues a sound effect. Opening the scope view requests two: 800d24cc and
+ * 800d24e8 (the switch-on blip and the hum that loops while the view is open). */
+static void sfx_hook(uint32_t* r, C12OrigFn orig) {
+    if (enabled && clean_scope && (r[4] == 0x800d24ccu || r[4] == 0x800d24e8u)) { r[2] = 0; return; }
+    orig(r);
+}
+
 __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     if (a->version < 2) return 0;
     api = a;
@@ -161,11 +171,13 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("eye_fwd", "Eye forward / back", &eye_fwd, -150.0f, 150.0f);
     api->setting_bool("strafe", "Keep looking where you aim while moving (strafe)", &strafe);
     api->setting_bool("hide_body", "Hide the hero's body", &hide_body);
+    api->setting_bool("clean_scope", "Scope view (R2) without scan lines, tint and hum", &clean_scope);
     api->setting_bool("viewmodel", "Weapon view model", &viewmodel);
     api->setting_float("vm_right", "Weapon: right / left", &vm_right, -200.0f, 200.0f);
     api->setting_float("vm_down", "Weapon: down / up", &vm_down, -200.0f, 200.0f);
     api->setting_float("vm_fwd", "Weapon: forward / back", &vm_fwd, 0.0f, 400.0f);
     api->setting_float("vm_yaw", "Weapon: turn (degrees)", &vm_yaw, -180.0f, 180.0f);
     api->setting_float("vm_pitch", "Weapon: tilt (degrees)", &vm_pitch, -90.0f, 90.0f);
+    api->hook(0x8005f380, sfx_hook);
     return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook);
 }
