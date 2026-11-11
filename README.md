@@ -27,8 +27,8 @@ rebindable keys, save to `c12.ini`), **`** (hold) = fast-forward, **Alt+Enter** 
 Default keyboard + mouse (rebind in the menu, Controls tab): WASD or arrows = move, mouse = camera (right stick),
 left click or Space = attack / accept (Cross), right click = first-person view (R2), Left Shift or middle click =
 lock on / strafe (R1), Q or mouse wheel = cycle weapons (L1), E = Square, F = Circle, R or Backspace = Triangle (back),
-C = L2, Enter = Start, G = Select. XInput pads work at the same time (analog sticks + rumble). Saves are plain
-files in `saves\\`.
+C = L2, Enter = Start, G = Select. XInput pads work at the same time (analog sticks + rumble). Saves go to
+`saves\card1.mcd`, a standard raw memory-card image (readable by emulators).
 
 ## Layout
 
@@ -37,7 +37,7 @@ files in `saves\\`.
 | `tools/recomp/` | The recompiler: function discovery, jump tables, MIPS → C |
 | `gen/` | Generated C: main EXE (1704 functions) + 25 overlays (~3900), `*_map.txt` = function lists |
 | `runtime/core.cpp` | Memory map, scheduler, IRQs, dispatch, interpreter fallback |
-| `runtime/bios.cpp`, `memcard.cpp` | High-level BIOS (no BIOS image needed), memory card as files |
+| `runtime/bios.cpp`, `memcard.cpp` | High-level BIOS (no BIOS image needed), memory card image (file API + raw sectors) |
 | `runtime/gte.cpp` | GTE with PGXP + widescreen projection |
 | `runtime/gpu*.cpp`, `hdtex.cpp` | GPU front-end, D3D11 renderer, software reference renderer, HD textures |
 | `runtime/spu.cpp`, `cdrom.cpp`, `hw.cpp` | Sound, CD-ROM + XA, timers/DMA/pad |

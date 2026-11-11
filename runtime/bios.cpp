@@ -390,7 +390,12 @@ static bool bios_b0(Ctx* c, u32 n) {
     case 0x3D: tty_putc((char)A0); return true;
     case 0x3F: { std::string s = gstr(A0); for (char ch : s) tty_putc(ch); return true; }
     case 0x4A: case 0x4B: case 0x4C: V0 = 1; return true;  // Init/Start/StopCARD
-    case 0x4E: case 0x4F: bios_deliver_event(0xF0000011u, 0x0004); V0 = 1; return true;  // _card_write/_card_read: done
+    case 0x4E: case 0x4F: {   // _card_write / _card_read(chan, sector, buf)
+        void mc_sector(int chan, u32 sector, u32 buf, bool write);
+        mc_sector((int)A0, A1, A2, n == 0x4E);
+        V0 = 1;
+        return true;
+    }
     case 0x50: V0 = 0; return true;
     case 0x51: V0 = (u32)-1; return true;
     case 0x54: V0 = 0; return true;
