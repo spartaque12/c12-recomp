@@ -47,6 +47,7 @@ static int scope_move;
 static float scope_dx, scope_dz;
 static int scope_fov = 1;          /* keep the same field of view in the scope view (R2) */
 static int last_view_a = -1;
+static int cur_face_a = -1;        /* facing when standing (the view), -1 = leave it */
 static int cur_move_a = -1;        /* wanted movement direction this frame, -1 = standing */
 static int in_scope, scope_frames, scope_entry_a = -1, scope_last_a = -1;
 static float look_sign = 1.0f;     /* +1 if the view's facing angle grows with the look yaw */
@@ -135,6 +136,7 @@ static void restore(uint32_t hero, int scope) {
     api->game_option("laser_beam", 1);
     api->game_option("pad_forward", 0);
     cur_move_a = -1;
+    cur_face_a = -1;
     if (saved_autocenter >= 0) { api->game_option("cam_autocenter", saved_autocenter); saved_autocenter = -1; }
     was_on = 0;
     vm_ok = 0;
@@ -252,12 +254,10 @@ static void apply(void) {
          * picture was already built from the real view above */
         cur_move_a = move_a;   /* applied again inside the game's steering (steer_hook) */
     }
-    if (face_view || move_a >= 0) {
-        /* The hero's facing is kept in several copies in the hero object and in his controller
-         * (hero+0xb0), and his matrix is a turn about the vertical axis by it. */
-        int a = move_a >= 0 ? move_a : view_a;
-        set_facing(hero, a);
-    }
+    /* The facing itself is only set inside the game's on-foot steering (steer_hook): while the
+     * game runs anything else for the hero - climbing a ladder, vaulting, cutscene moves - the mod
+     * leaves him alone. */
+    cur_face_a = face_view ? view_a : -1;
     api->set_fov(fov);
     api->game_option("aim_to_view", 1);   /* shots go to the centre of the screen */
     api->game_option("laser_beam", laser_beam);
@@ -366,10 +366,13 @@ static void sfx_hook(uint32_t* r, C12OrigFn orig) {
  * direction right before it runs, so he runs exactly that way (with the game's own collision). */
 static void steer_hook(uint32_t* r, C12OrigFn orig) {
     uint32_t hero = (uint32_t)r32(0x800efdb8);
-    if (was_on && cs_move && cur_move_a >= 0 && is_ptr(hero) && (uint32_t)r32(0x800efdc8) == hero) {
-        uint32_t tg = (uint32_t)r32(hero + 0x9c);
-        if (is_ptr(tg)) w16(tg + 0x1a, cur_move_a);
-        set_facing(hero, cur_move_a);
+    if (was_on && is_ptr(hero) && (uint32_t)r32(0x800efdc8) == hero) {
+        int a = (cs_move && cur_move_a >= 0) ? cur_move_a : cur_face_a;
+        if (a >= 0) {
+            uint32_t tg = (uint32_t)r32(hero + 0x9c);
+            if (is_ptr(tg)) w16(tg + 0x1a, a);   /* the steering's target, so it does not turn him back */
+            set_facing(hero, a);
+        }
     }
     orig(r);
 }
