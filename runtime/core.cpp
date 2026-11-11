@@ -104,6 +104,13 @@ void irq_raise(int n) {
 static int g_in_exception;
 
 u32 g_watch_addr;
+u32 g_store_watch;
+void store_watch_hit(Ctx* c, u32 a, u32 v) {
+    (void)c;
+    logf("STORE %08x <- %08x frame %d in:", a, v, g_frame);
+    for (int i = g_cs_n - 1, k = 0; i >= 0 && k < 8; i--, k++) logf(" %08x", g_cs[i & 4095]);
+    logf("\n");
+}
 static u32 g_watch_val;
 void watch_check(const char* where) {
     if (!g_watch_addr) return;

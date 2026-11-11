@@ -41,6 +41,9 @@ static float look_yaw, look_pitch;
 static int look_valid, saved_ac2 = -1;
 static int face_view = 1;          /* the hero faces where you look when standing still */
 static int cs_move = 1;           /* move relative to the view at once: backpedal and strafe (CS-style) */
+static float scope_walk = 12.0f;    /* walking speed while aiming (game units per frame; running is 41) */
+static int scope_move;
+static float scope_dx, scope_dz;
 static int scope_fov = 1;          /* keep the same field of view in the scope view (R2) */
 static int last_view_a = -1;
 static int cur_move_a = -1;        /* wanted movement direction this frame, -1 = standing */
@@ -102,6 +105,7 @@ static float fsin(float deg) {
     return x * (1.0f - x2 / 6.0f * (1.0f - x2 / 20.0f * (1.0f - x2 / 42.0f)));
 }
 static float fcos(float deg) { return fsin(deg + 90.0f); }
+static float fsqrt1(float v) { float x = v > 1.0f ? v : 1.0f; for (int i = 0; i < 10; i++) x = 0.5f * (x + v / x); return x; }
 
 /* The hero's facing angle is kept in several copies in the hero object and in his controller
  * (hero+0xb0), and his matrix is a turn about the vertical axis by it. */
@@ -153,10 +157,34 @@ static void apply(void) {
         }
         if (scope_frames < 3 && scope_entry_a >= 0) { w16(0x800f0ca8, scope_entry_a); scope_frames++; }
         scope_last_a = r16(0x800f0ca8) & 0xfff;
+        if (scope_walk > 0.0f) {
+            /* walking while aiming: the movement keys no longer turn the aim (the mouse does), and the
+             * hero is moved slowly along the scope's own view, relative to where it looks */
+            api->game_option("pad_forward", 2);
+            int lx = 0, ly = 0;
+            uint32_t b = api->pad(&lx, &ly);
+            float mx = (float)lx / 127.0f, my = (float)-ly / 127.0f;
+            if (b & (1u << 4)) my += 1.0f;
+            if (b & (1u << 6)) my -= 1.0f;
+            if (b & (1u << 5)) mx += 1.0f;
+            if (b & (1u << 7)) mx -= 1.0f;
+            float len = mx * mx + my * my;
+            scope_move = 0;
+            if (len > 0.1f) {
+                float a = scope_last_a * (360.0f / 4096.0f);
+                float fx = fsin(a), fz = fcos(a);                  /* forward on the ground */
+                float dx = fx * my + fz * mx, dz = fz * my - fx * mx;   /* right = forward turned 90 deg */
+                float k = 1.0f / fsqrt1(len);
+                scope_dx = dx * k; scope_dz = dz * k;
+                scope_move = 1;   /* applied in the game's physics step (physics_hook) */
+            }
+        }
     }
     if (!scope && in_scope) {
         /* leaving the scope: carry on looking where the scope looked */
         in_scope = 0;
+        api->game_option("pad_forward", 0);
+        scope_move = 0;
         if (scope_entry_a >= 0 && scope_last_a >= 0) {
             int d = ((scope_last_a - scope_entry_a + 2048) & 0xfff) - 2048;
             look_turn += (float)d;
@@ -327,6 +355,20 @@ static void steer_hook(uint32_t* r, C12OrigFn orig) {
     orig(r);
 }
 
+/* 8002c048(obj, dir, speed) is the game's physics step: it moves an object along dir (unit vector
+ * x 4096, in the scratchpad) at speed, with the game's own collision. In the scope view it is called
+ * for the hero with speed 0; while walking there the mod passes its direction and a slow speed. */
+static void physics_hook(uint32_t* r, C12OrigFn orig) {
+    uint32_t hero = (uint32_t)r32(0x800efdb8);
+    if (enabled && in_scope && scope_move && scope_walk > 0.0f && r[4] == hero && r[6] == 0) {
+        api->write32(r[5] + 0, (uint32_t)(int32_t)(scope_dx * 4096.0f));
+        api->write32(r[5] + 4, 0);
+        api->write32(r[5] + 8, (uint32_t)(int32_t)(scope_dz * 4096.0f));
+        r[6] = (uint32_t)(int)scope_walk;
+    }
+    orig(r);
+}
+
 __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     if (a->version < 2) return 0;
     api = a;
@@ -337,6 +379,7 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_bool("direct_look", "Direct mouse look (no camera easing)", &direct_look);
     api->setting_bool("strafe", "Keep looking where you aim while moving (strafe)", &strafe);
     api->setting_bool("cs_move", "CS-style movement (backpedal and strafe relative to the view)", &cs_move);
+    api->setting_float("scope_walk", "Walking speed while aiming (0 = keys turn the aim; running is 41)", &scope_walk, 0.0f, 41.0f);
     api->setting_bool("scope_fov", "Same field of view in the scope (R2)", &scope_fov);
     api->setting_bool("face_view", "Hero faces where you look (shots go to the crosshair)", &face_view);
     api->setting_bool("hide_body", "Hide the hero's body", &hide_body);
@@ -348,5 +391,5 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("vm_yaw", "Weapon: turn (degrees)", &vm_yaw, -180.0f, 180.0f);
     api->setting_float("vm_pitch", "Weapon: tilt (degrees)", &vm_pitch, -90.0f, 90.0f);
     api->hook(0x8005f380, sfx_hook);
-    return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook);
+    return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook) && api->hook(0x8002c048, physics_hook);
 }

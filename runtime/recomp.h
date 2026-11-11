@@ -116,8 +116,11 @@ static inline void mem_w16(Ctx* c, u32 a, u32 v) {
     if (p < RAM_SIZE) { u16 t = (u16)v; memcpy(g_ram + p, &t, 2); return; }
     mem_w16_slow(c, a, v);
 }
+extern u32 g_store_watch;   /* debug: physical RAM address whose 32-bit stores are logged (0 = off) */
+void store_watch_hit(Ctx* c, u32 a, u32 v);
 static inline void mem_w32(Ctx* c, u32 a, u32 v) {
     u32 p = PHYS(a);
+    if (p == g_store_watch && p) store_watch_hit(c, a, v);
     if (p < RAM_SIZE) { memcpy(g_ram + p, &v, 4); return; }
     mem_w32_slow(c, a, v);
 }

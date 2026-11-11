@@ -266,8 +266,11 @@ void plat_input_poll() {
     } else if (!(down & (1u << 9))) g_aim_mx = g_aim_my = 0;
     g_user_buttons = down;
     memcpy(g_user_axes, ax, 4);
-    if (g_pad_forward) {   // a mod steers the movement itself: the game sees "run straight forward"
+    if (g_pad_forward == 1) {   // a mod steers the movement itself: the game sees "run straight forward"
         down = (down & ~0xF0u) | (1u << 4);
+        ax[2] = ax[3] = 128;
+    } else if (g_pad_forward == 2) {   // a mod moves the hero itself: the game sees no movement input
+        down &= ~0xF0u;
         ax[2] = ax[3] = 128;
     }
     g_pad_state[0] = (u16)~down;

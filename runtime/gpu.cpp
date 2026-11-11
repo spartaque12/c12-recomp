@@ -100,7 +100,7 @@ int g_hud_fix = 1;
 float g_near_cull = 0.0f;
 int g_near_plane_cull = 1;
 struct Box { int x0, y0, x1, y1; };
-struct Tf { float a, k; };
+struct Tf { float a, k, dy; };
 static bool g_collect;                 // pass 1: record boxes, draw nothing
 static std::vector<Box> g_boxes;
 static std::vector<Tf> g_tf;
@@ -141,11 +141,14 @@ static bool prim_2d(int x0, int y0, int x1, int y1, int is3d = 0) {
         g_tf_i++;
         g_st.xs_a = t.a;
         g_st.xs_k = t.k;
+        g_st.ys = t.dy;
         g_st.xs_clip = g_sub_window;
     }
     return false;
 }
 
+static int g_scope_seen = -100;   // last frame that drew the scope's scan-line strips
+int g_scope_overlay = 1;          // 0 = mods asked for the scope view without its overlay
 static void layout_2d(float k) {
     size_t n = g_boxes.size();
     g_tf.assign(n, Tf{0, 1});
@@ -153,10 +156,10 @@ static void layout_2d(float k) {
     for (size_t i = 0; i < n; i++) if (g_box3d[i] == 2) g_box3d[i] = g_world_layout ? 1 : 0;   // deep slots: scene only in a real world list
     // a list that clips itself to a small window (the scope's info line) is laid out against the
     // screen area the previous lists used
-    static int scr_l = 0, scr_r = 0;
+    static int scr_l = 0, scr_r = 0, scr_t = 0;
     // (a window is anything clearly narrower than the screen area seen so far)
     g_sub_window = scr_r - scr_l >= 200 && (g_clip_r - g_clip_l) * 10 < (scr_r - scr_l) * 9;
-    if (!g_sub_window && g_clip_r - g_clip_l >= 200) { scr_l = g_clip_l; scr_r = g_clip_r; }
+    if (!g_sub_window && g_clip_r - g_clip_l >= 200) { scr_l = g_clip_l; scr_r = g_clip_r; scr_t = g_clip_t; }
     const int L = scr_l, R = scr_r, W = R - L;
     if (W < 200) return;
     if (g_sub_window) {
@@ -251,6 +254,18 @@ static void layout_2d(float k) {
             if (best < 0 || area < best) { best = area; gt[i] = gt[j]; }
         }
     }
+    // The scope view draws the HUD inside its letterbox: health bar 18 lower, weapon box 16 higher, its
+    // info box at the top right just under the bar. Without the letterbox (scope_overlay = 0) they go
+    // back to their normal places and the info box up to the health bar's height.
+    if (!g_scope_overlay && g_frame - g_scope_seen <= 4) {
+        for (size_t i = 0; i < n; i++) {
+            if (find((int)i) != (int)i || g_box3d[i]) continue;
+            int y0 = gb[i].y0 - scr_t, y1 = gb[i].y1 - scr_t;
+            if (gb[i].x1 - gb[i].x0 >= W - 32) continue;          // full-width pieces stay
+            if (y1 <= 70) gt[i].dy = -18.0f;
+            else if (y0 >= 160) gt[i].dy = 16.0f;
+        }
+    }
     for (size_t i = 0; i < n; i++) g_tf[i] = g_box3d[i] ? Tf{0, 1} : gt[find((int)i)];
     g_placed.erase(std::remove_if(g_placed.begin(), g_placed.end(), [](const Placed& p) { return g_frame - p.frame > 4; }), g_placed.end());
     for (size_t i = 0; i < n; i++)
@@ -270,8 +285,6 @@ static bool g_in_list;
 static bool g_list_had_3d;  // the list being replayed contained tracked 3D polygons
 static bool g_list_3d;     // the display list being drawn is the world (large ordering table)
 
-static int g_scope_seen = -100;   // last frame that drew the scope's scan-line strips
-int g_scope_overlay = 1;          // 0 = mods asked for the scope view without its overlay
 static void draw_polygon() {
     u32 cmd = g_fifo[0] >> 24;
     bool gouraud = cmd & 0x10, quad = cmd & 0x08, tex = cmd & 0x04;
@@ -404,6 +417,7 @@ static void draw_polygon() {
         for (int k = 1; k < n; k++) { x0 = std::min(x0, v[k].x); x1 = std::max(x1, v[k].x); y0 = std::min(y0, v[k].y); y1 = std::max(y1, v[k].y); }
         // in the world list only the front-most slots can hold a 2D panel; everything behind is the scene
         if (prim_2d(x0, y0, x1, y1, pg_kind != 0 ? 1 : (g_list_3d && g_ot_index < g_ot_slots_cur - 8) ? 2 : 0)) return;
+        if (g_st.ys != 0.0f) for (int k = 0; k < n; k++) { v[k].y += (int)g_st.ys; v[k].py += g_st.ys; }
     }
     if (g_dbg_file) {
         fprintf(g_dbg_file, "poly %02x ot %d pgxp %d tp %d,%d semi %d:", cmd, g_ot_index, pg_kind, g_st.tpx, g_st.tpy, (int)g_st.semi);
@@ -446,6 +460,7 @@ static void draw_rect() {
     g_st.gouraud = false;
     g_st.dither = false;
     if (prim_2d(x, y, x + w, y + h)) return;
+    y += (int)g_st.ys;
     if (g_dbg_file) { fprintf(g_dbg_file, "rect %02x ot %d: %d,%d %dx%d uv %d,%d tp %d,%d", cmd, g_ot_index, x, y, w, h, uv & 0xFF, (uv >> 8) & 0xFF, g_st.tpx, g_st.tpy); fputc(10, g_dbg_file); }
     if (!g_scope_overlay && g_list_3d) {
         // The scope view's scan lines are 256x1 strips that re-draw every other line from the frame
@@ -471,6 +486,12 @@ static void draw_line_seg(const GpuVtx& a, const GpuVtx& b, bool gouraud, bool s
     g_st.semi = semi;
     g_st.gouraud = gouraud;
     g_st.dither = (g_stat & 0x200) != 0;
+    if (g_st.ys != 0.0f) {
+        GpuVtx a2 = a, b2 = b;
+        a2.y += (int)g_st.ys; a2.py += g_st.ys; b2.y += (int)g_st.ys; b2.py += g_st.ys;
+        g_be->line(a2, b2, g_st);
+        return;
+    }
     g_be->line(a, b, g_st);
 }
 
@@ -780,6 +801,7 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
         g_tf_on = false;
         g_st.xs_a = 0;
         g_st.xs_k = 1;
+        g_st.ys = 0;
         g_st.xs_clip = 0;
         g_ot_slots = slots;
         if (g_log_level >= 3 && (g_frame % 100) < 2) logf("frame %d list @%06x: %d slots%s\n", g_frame, madr & 0x1FFFFF, slots, is2d ? " (2D)" : "");

@@ -364,6 +364,7 @@ static void hook_fire(Ctx* c, RecompFn orig) {
 u32 g_trace_fn;
 static void hook_trace(Ctx* c, RecompFn orig) {
     logf("trace %08x frame %d a0=%08x a1=%08x a2=%08x a3=%08x ra=%08x stack:", g_trace_fn, g_frame, c->r[4], c->r[5], c->r[6], c->r[7], c->r[31]);
+    if ((c->r[5] >> 24) == 0x80 || (c->r[5] >> 20) == 0x1f8) logf(" [a1: %d %d %d %d]", (s32)mem_r32(c, c->r[5]), (s32)mem_r32(c, c->r[5] + 4), (s32)mem_r32(c, c->r[5] + 8), (s32)mem_r32(c, c->r[5] + 12));
     for (int i = g_cs_n - 1, k = 0; i >= 0 && k < 10; i--, k++) logf(" %08x", g_cs[i & 4095]);
     logf("\n");
     orig(c);

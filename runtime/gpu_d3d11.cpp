@@ -276,17 +276,18 @@ static void begin_prim(const GpuState& s, int kind, int need, int bx1, int by1, 
     }
     if (rep_srv != cur_rep) { flush(); cur_rep = rep_srv; }
     // a small clip window (scrolling text inside a box) moves with the widescreen HUD layout
-    int cx1 = s.cx1, cx2 = s.cx2;
+    int cx1 = s.cx1, cx2 = s.cx2, cy1 = s.cy1, cy2 = s.cy2;
     if (s.xs_k != 1.0f && s.xs_clip) {
         cx1 = (int)floorf(s.xs_a + (cx1 - s.xs_a) * s.xs_k);
         cx2 = (int)ceilf(s.xs_a + (cx2 + 1 - s.xs_a) * s.xs_k) - 1;
     }
-    if (kind != cur_kind || cx1 != cur_clip[0] || s.cy1 != cur_clip[1] || cx2 != cur_clip[2] || s.cy2 != cur_clip[3] || nverts + need > MAXV) {
+    if (s.xs_clip && s.ys != 0.0f) { cy1 += (int)s.ys; cy2 += (int)s.ys; }
+    if (kind != cur_kind || cx1 != cur_clip[0] || cy1 != cur_clip[1] || cx2 != cur_clip[2] || cy2 != cur_clip[3] || nverts + need > MAXV) {
         flush();
         cur_kind = kind;
-        cur_clip[0] = cx1; cur_clip[1] = s.cy1; cur_clip[2] = cx2; cur_clip[3] = s.cy2;
+        cur_clip[0] = cx1; cur_clip[1] = cy1; cur_clip[2] = cx2; cur_clip[3] = cy2;
     }
-    add_dirty(std::max(bx1, cx1), std::max(by1, s.cy1), std::min(bx2, cx2 + 1), std::min(by2, s.cy2 + 1));
+    add_dirty(std::max(bx1, cx1), std::max(by1, cy1), std::min(bx2, cx2 + 1), std::min(by2, cy2 + 1));
 }
 
 int g_big_polys = 1;
