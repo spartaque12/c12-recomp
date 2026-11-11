@@ -244,6 +244,7 @@ static void rtp(Ctx* c, int v, int sh, int lm, bool last) {
         pv.x = (float)(C[24] / 65536.0 + fx * pq * g_ws_scale);
         pv.y = (float)(C[25] / 65536.0 + fy * pq);
         pv.w = (float)zc;
+        pv.pad = fz < h * 0.5 ? 1 : 0;   // behind the near plane: the console's divide overflows, the position is garbage
         g_gte_h = (float)h;
         pv.val = (u32)D[14];
         mv_track(c->vsrc[v], pv);

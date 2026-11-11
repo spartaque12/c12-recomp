@@ -98,6 +98,7 @@ static GpuVtx make_vtx(u32 xy, u32 rgb, u32 uv, u32 addr) {
 // Anything spanning the full width (fades, letterbox bars, tiled backgrounds) stays stretched.
 int g_hud_fix = 1;
 float g_near_cull = 0.0f;
+int g_near_plane_cull = 1;
 struct Box { int x0, y0, x1, y1; };
 struct Tf { float a, k; };
 static bool g_collect;                 // pass 1: record boxes, draw nothing
@@ -105,10 +106,16 @@ static std::vector<Box> g_boxes;
 static std::vector<Tf> g_tf;
 static size_t g_tf_i;
 static bool g_tf_on;
+static int g_clip_l, g_clip_r;
+static bool g_collect_3d;              // the list being examined contains real 3D polygons
 static int g_last_pgxp_frame = -100;   // last frame that drew real 3D geometry
 
 static bool prim_2d(int x0, int y0, int x1, int y1) {
-    if (g_collect) { g_boxes.push_back({x0, y0, x1, y1}); return true; }
+    if (g_collect) {
+        if (g_boxes.empty()) { g_clip_l = g_st.cx1; g_clip_r = g_st.cx2 + 1; }   // the list sets its own drawing area
+        g_boxes.push_back({x0, y0, x1, y1});
+        return true;
+    }
     if (g_tf_on) {
         Tf t = g_tf_i < g_tf.size() ? g_tf[g_tf_i] : Tf{0, 1};
         g_tf_i++;
@@ -122,7 +129,11 @@ static void layout_2d(float k) {
     size_t n = g_boxes.size();
     g_tf.assign(n, Tf{0, 1});
     if (n == 0 || n > 1500) return;
-    const int L = g_st.cx1, R = g_st.cx2 + 1, W = R - L;
+    // a list that clips itself to a small window (the scope's info line) is laid out against the
+    // screen area the previous lists used
+    static int scr_l = 0, scr_r = 0;
+    if (g_clip_r - g_clip_l >= 200) { scr_l = g_clip_l; scr_r = g_clip_r; }
+    const int L = scr_l, R = scr_r, W = R - L;
     if (W < 200) return;
     std::vector<int> par(n);
     for (size_t i = 0; i < n; i++) par[i] = (int)i;
@@ -166,6 +177,9 @@ static void layout_2d(float k) {
         }
     }
     for (size_t i = 0; i < n; i++) g_tf[i] = gt[find((int)i)];
+    if (g_log_level >= 3 && (g_frame % 100) == 0)
+        for (size_t i = 0; i < n; i++) if (find((int)i) == (int)i)
+            logf("  2D group %d..%d x %d..%d -> anchor %.0f k %.2f (clip %d..%d)\n", gb[i].x0, gb[i].x1, gb[i].y0, gb[i].y1, gt[i].a, gt[i].k, L, R);
 }
 
 // recently resolved vertices of screen-space-subdivided polygons (parents for midpoint reconstruction)
@@ -274,7 +288,15 @@ static void draw_polygon() {
         if (got == n) { all = true; pg_kind = 2; }
         else { pg_kind = got ? 3 : 0; for (int k = 0; k < n; k++) v[k].pw = 0; }
     } else if (!all) for (int k = 0; k < n; k++) { v[k].px = (float)v[k].x; v[k].py = (float)v[k].y; v[k].pw = 0; }
-    if (all) { g_last_pgxp_frame = g_frame; g_list_had_3d = true; }
+    if (all) { g_last_pgxp_frame = g_frame; g_list_had_3d = true; g_collect_3d = true; }
+    // A world polygon whose every vertex lies behind the near plane has no valid projection (the
+    // console's divide overflows and the coordinates saturate). The game sends such polygons for one
+    // frame when leaving first-person view: the hero's own body, seen from inside his head.
+    if (g_near_plane_cull && g_list_3d) {
+        int behind = 0;
+        for (int k = 0; k < n; k++) { PgxpVal p; if (pgxp_cache_get(vxy[k], &p) && p.pad) behind++; }
+        if (behind == n) return;
+    }
     // Near cull: geometry closer to the eye than this multiple of the projection distance is
     // dropped (the hero's own body when the camera travels through his head leaving aim mode).
     if (all && g_near_cull > 0.0f) {
@@ -604,13 +626,20 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
         g_sub_n = 0;
         // 2D layers: the HUD's own small table, or any list while no 3D is on screen (menus, loading)
         bool is2d = g_hud_fix && g_cfg.widescreen && g_ws_scale != 1.0f && slots > 0 &&
-                    (slots <= 64 || g_frame - g_last_pgxp_frame > 6);
+                    (slots <= 64 || g_frame - g_last_pgxp_frame > 6 || slots >= 1024);
         if (is2d) {
             FrontState fs = {g_stat, g_st, g_off_x, g_off_y, {g_e1, g_e2, g_e3, g_e4, g_e5, g_e6}, g_fifo_n, g_fifo_need, g_poly_line, g_xfer_mode};
             g_boxes.clear();
+            bool in_game = g_frame - g_last_pgxp_frame <= 6;
+            g_collect_3d = false;
             g_collect = true;
             walk_list(madr, true);
             g_collect = false;
+            // a big list during gameplay is 2D only when it holds no 3D at all (the game's second,
+            // nearly empty list carries HUD text such as the scope's info line)
+            if (g_log_level >= 3 && (g_frame % 100) == 0) logf("  collect: %d boxes, 3d=%d in_game=%d clip %d..%d\n", (int)g_boxes.size(), (int)g_collect_3d, (int)in_game, g_clip_l, g_clip_r);
+            if (slots > 64 && in_game && g_collect_3d) g_boxes.clear();
+            g_sub_n = 0;
             layout_2d(g_ws_scale);
             g_stat = fs.stat; g_st = fs.st; g_off_x = fs.offx; g_off_y = fs.offy;
             g_e1 = fs.e[0]; g_e2 = fs.e[1]; g_e3 = fs.e[2]; g_e4 = fs.e[3]; g_e5 = fs.e[4]; g_e6 = fs.e[5];
@@ -655,6 +684,7 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
         g_st.xs_k = 1;
         g_ot_slots = slots;
         if (g_log_level >= 3 && (g_frame % 100) == 0) logf("frame %d list @%06x: %d slots%s\n", g_frame, madr & 0x1FFFFF, slots, is2d ? " (2D)" : "");
+        if (g_log_level >= 4) { extern float g_gte_h; logf("frame %d list @%06x: %d slots, H %.0f, off %d,%d clip %d..%d x %d..%d\n", g_frame, madr & 0x1FFFFF, slots, g_gte_h, g_off_x, g_off_y, g_st.cx1, g_st.cx2, g_st.cy1, g_st.cy2); }
         if (g_dbg_file && g_dbg_frame != g_frame) { fclose(g_dbg_file); g_dbg_file = nullptr; }
         return;
     }
