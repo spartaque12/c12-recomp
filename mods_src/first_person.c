@@ -6,7 +6,8 @@
  * run in any direction. The weapon is drawn as a view model at an adjustable place in front of the eye.
  *
  * What the mod knows about the game (European release, SCES-03364):
- *   80018320(cam)   camera update. cam+0x40 -> view object: camera-to-world rotation (3x3 s16,
+ *   80018320(cam)   camera update (runs for several cameras; the view object's +4 names the one
+ *                   that drives the picture - in cutscenes it is not the hero's). cam+0x40 -> view object: camera-to-world rotation (3x3 s16,
  *                   4096 = 1.0, columns = right / down / forward) at +0x0c, eye position (3 x s32)
  *                   at +0x20.
  *   800f1338        1 while the game's own scope view (R2) is active.
@@ -97,7 +98,10 @@ static void apply(void) {
     uint32_t hero = (uint32_t)r32(0x800efdb8);
     uint32_t vo = (uint32_t)r32(cam + 0x40);
     int scope = r32(0x800f1338) == 1;   /* the game's own scope view is active */
-    if (!enabled || !is_ptr(hero) || !is_ptr(vo) || scope) { restore(hero, scope); return; }
+    /* The view object records the camera that drives it (+4). In cutscenes another camera does:
+     * then the mod steps aside and the cutscene plays as made. */
+    int cutscene = is_ptr(vo) && (uint32_t)r32(vo + 4) != cam;
+    if (!enabled || !is_ptr(hero) || !is_ptr(vo) || scope || cutscene) { restore(hero, scope); return; }
     if (!was_on) saved_autocenter = -1;
     was_on = 1;
     if (!direct_look) {   /* without direct look, strafing relies on the runtime's "hold direction" option */
@@ -153,7 +157,7 @@ static void camera_hook(uint32_t* r, C12OrigFn orig) {
     /* the game updates more than one camera per frame; only the one that follows the hero is ours */
     if (!is_ptr(hero) || !is_ptr(vo) || (uint32_t)r32(cam + 0x44) != hero + 0x14) { orig(r); return; }
     g_cam = cam;
-    int active = enabled && direct_look && r32(0x800f1338) != 1;
+    int active = enabled && direct_look && r32(0x800f1338) != 1 && (uint32_t)r32(vo + 4) == cam;
     if (active) {
         if (!look_valid) {
             look_yaw = (float)(r16(cam + 0x22) & 0xfff);

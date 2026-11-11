@@ -20,6 +20,7 @@ bool g_window_resized;
 // raw mouse state (accumulated between pad polls)
 static long g_mouse_dx, g_mouse_dy;
 long g_cam_mx, g_cam_my;   // raw mouse counts waiting for the game's next camera update
+long g_aim_mx, g_aim_my;   // same, for the scope view (R2)
 static int g_wheel_pulse;
 static bool g_captured;
 static float g_mx_f, g_my_f;
@@ -194,24 +195,8 @@ void plat_input_poll() {
                 // True mouse aim: add the raw mouse movement straight to the game's own view
                 // angles (s16, 4096 units per turn; pitch at 800f0ca6, yaw at 800f0ca8). No stick,
                 // no dead zone, no acceleration: 1:1 and sub-step accurate.
-                static float fy, fp;
-                float scale = 0.55f * g_cfg.mouse_sens;
-                fy += (float)dx * scale;
-                fp += (float)dy * scale * (g_cfg.mouse_aim_invert ? -1.0f : 1.0f);
-                int iy = (int)fy, ip = (int)fp;
-                fy -= iy; fp -= ip;
-                if (iy || ip) {
-                    s16 yaw, pitch;
-                    memcpy(&pitch, g_ram + 0xf0ca6, 2);
-                    memcpy(&yaw, g_ram + 0xf0ca8, 2);
-                    yaw = (s16)(yaw + iy);
-                    int np = pitch + ip;
-                    if (np > 780) np = 780;
-                    if (np < -780) np = -780;
-                    pitch = (s16)np;
-                    memcpy(g_ram + 0xf0ca6, &pitch, 2);
-                    memcpy(g_ram + 0xf0ca8, &yaw, 2);
-                }
+                g_aim_mx += dx;
+                g_aim_my += dy * (g_cfg.mouse_aim_invert ? -1 : 1);
                 g_mx_f = g_my_f = 0;
             } else {
                 if (sx) ax[2] = (u8)(128 - sx);
@@ -229,6 +214,43 @@ void plat_input_poll() {
         }
     } else g_mouse_dx = g_mouse_dy = 0;
     if (g_cfg.mouse_direct_cam && !(down & (1u << 9))) { g_cam_mx += smx; g_cam_my += smy; }   // scripted mouse (tests)
+    if (g_cfg.mouse_direct_aim && (down & (1u << 9))) { g_aim_mx += smx; g_aim_my += smy; }
+    if (g_cfg.mouse_direct_aim && (down & (1u << 9)) && (g_aim_mx || g_aim_my)) {
+        // True mouse aim: add the movement straight to the scope view's angles (s16, 4096 per turn;
+        // pitch at 800f0ca6, yaw at 800f0ca8). The level code turns the hero (and so his shots) only
+        // when its own input turned the view, so his rotation - a turn about the vertical axis by
+        // that yaw, in the hero object's matrix - is set here as well.
+        static float fy, fp;
+        float scale = 0.55f * g_cfg.mouse_sens;
+        fy += (float)g_aim_mx * scale;
+        fp += (float)g_aim_my * scale;
+        g_aim_mx = g_aim_my = 0;
+        int iy = (int)fy, ip = (int)fp;
+        fy -= iy; fp -= ip;
+        if (iy || ip) {
+            s16 yaw, pitch;
+            memcpy(&pitch, g_ram + 0xf0ca6, 2);
+            memcpy(&yaw, g_ram + 0xf0ca8, 2);
+            yaw = (s16)(((yaw + iy) & 0xfff));
+            int np = pitch + ip;
+            if (np > 780) np = 780;
+            if (np < -780) np = -780;
+            pitch = (s16)np;
+            memcpy(g_ram + 0xf0ca6, &pitch, 2);
+            memcpy(g_ram + 0xf0ca8, &yaw, 2);
+            u32 hero;
+            memcpy(&hero, g_ram + 0xefdb8, 4);
+            if ((hero >> 24) == 0x80 && (hero & 0x1FFFFF) + 0x28 < RAM_SIZE) {
+                double a = yaw * (6.283185307179586 / 4096.0);
+                s16 cs = (s16)lround(cos(a) * 4096.0), sn = (s16)lround(sin(a) * 4096.0), msn = (s16)-sn;
+                u8* m = g_ram + ((hero + 0x14) & 0x1FFFFF);
+                memcpy(m + 0, &cs, 2);    // m00
+                memcpy(m + 4, &sn, 2);    // m02
+                memcpy(m + 12, &msn, 2);  // m20
+                memcpy(m + 16, &cs, 2);   // m22
+            }
+        }
+    } else if (!(down & (1u << 9))) g_aim_mx = g_aim_my = 0;
     g_pad_state[0] = (u16)~down;
     memcpy(g_pad_axes[0], ax, 4);
 }
