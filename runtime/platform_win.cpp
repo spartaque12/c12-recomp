@@ -248,6 +248,16 @@ void plat_input_poll() {
                 memcpy(m + 4, &sn, 2);    // m02
                 memcpy(m + 12, &msn, 2);  // m20
                 memcpy(m + 16, &cs, 2);   // m22
+                // his facing angle is also kept in several copies in the hero object and in his
+                // controller (hero+0xb0); the shot direction comes from those
+                static const int hero_offs[] = {0x116, 0x118, 0x11e, 0x120, 0x126, 0x128, 0x12e, 0x130, 0x154};
+                for (int o : hero_offs) memcpy(g_ram + ((hero + o) & 0x1FFFFF), &yaw, 2);
+                u32 ctl;
+                memcpy(&ctl, g_ram + ((hero + 0xb0) & 0x1FFFFF), 4);
+                if ((ctl >> 24) == 0x80) {
+                    static const int ctl_offs[] = {0x50, 0x5c, 0x68, 0x74, 0xa8};
+                    for (int o : ctl_offs) memcpy(g_ram + ((ctl + o) & 0x1FFFFF), &yaw, 2);
+                }
             }
         }
     } else if (!(down & (1u << 9))) g_aim_mx = g_aim_my = 0;
