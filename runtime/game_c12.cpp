@@ -243,7 +243,45 @@ static void hook_frustum_corners(Ctx* c, RecompFn orig) {
     }
 }
 
+// ---- third-person camera ----------------------------------------------------------------------
+// 80015b50(cam) turns the right stick into this frame's target angles: pitch at cam+0x2c, yaw at
+// cam+0x2e (12-bit, 4096 per turn), current angles at cam+0x20/+0x22, flags at cam+0x18
+// (0x800 / 0x1000 = pitch / yaw target given). Raw mouse: the same targets, set from mouse counts.
+// When the player gives no target and the hero moves, the game swings the camera back behind him;
+// holding the targets every frame instead breaks the camera's position follow (tried), so the
+// auto-centre is left alone.
+extern long g_cam_mx, g_cam_my;
+int g_cam_log;
+static void hook_cam_stick(Ctx* c, RecompFn orig) {
+    u32 cam = c->r[4];
+    orig(c);
+    static float fx, fy;
+    float scale = 0.55f * g_cfg.mouse_sens;
+    fx += (float)g_cam_mx * scale;
+    fy += (float)g_cam_my * scale;
+    g_cam_mx = g_cam_my = 0;
+    int ix = (int)fx, iy = (int)fy;
+    fx -= ix; fy -= iy;
+    if (g_cam_log) logf("cam %08x mode %d pitch %d yaw %d  target %d %d flags %08x\n", cam, mem_r8(c, cam + 0x77), (s16)mem_r16(c, cam + 0x20), (s16)mem_r16(c, cam + 0x22), (s16)mem_r16(c, cam + 0x2c), (s16)mem_r16(c, cam + 0x2e), mem_r32(c, cam + 0x18));
+    if (!g_cfg.mouse_direct_cam) ix = iy = 0;
+    u32 fl = mem_r32(c, cam + 0x18);
+    if (!ix && !iy) return;
+    if (iy) {
+        int p = (((s16)mem_r16(c, cam + 0x20) + 0x400) & 0xfff) - iy;
+        if (p < 0x20) p = 0x20;
+        if (p > 0x7e0) p = 0x7e0;
+        mem_w16(c, cam + 0x2c, (u32)((p - 0x400) & 0xfff));
+        fl |= 0x800;
+    }
+    if (ix) {
+        mem_w16(c, cam + 0x2e, (u32)(((s16)mem_r16(c, cam + 0x22) + ix) & 0xfff));
+        fl |= 0x1000;
+    }
+    mem_w32(c, cam + 0x18, fl & ~4u);
+}
+
 void game_init() {
+    hook_set(0x80015b50, hook_cam_stick);
     hook_set(0x80065db8, hook_frustum_corners);
     hook_set(0x800612b8, hook_relocate);
     hook_set(0x800a1128, hook_vsync_wait);

@@ -19,12 +19,13 @@ bool g_window_resized;
 
 // raw mouse state (accumulated between pad polls)
 static long g_mouse_dx, g_mouse_dy;
+long g_cam_mx, g_cam_my;   // raw mouse counts waiting for the game's next camera update
 static int g_wheel_pulse;
 static bool g_captured;
 static float g_mx_f, g_my_f;
 
 // scripted input (tests): entries "from to mask"
-struct ScriptEnt { int from, to; u16 mask; };
+struct ScriptEnt { int from, to; u32 mask; int mx, my; };   // bits 16..19: right stick left/right/up/down; MX<n>/MY<n>: mouse counts per poll
 static std::vector<ScriptEnt> g_script;
 
 static const struct { const char* name; int bit; } g_btn_names[] = {
@@ -39,11 +40,19 @@ void plat_load_script(const char* path) {
         int a, b;
         char names[200] = "";
         if (sscanf(line, "%d %d %199[^\n]", &a, &b, names) < 3) continue;
-        u16 mask = 0;
-        for (char* t = strtok(names, " +,\r"); t; t = strtok(nullptr, " +,\r"))
+        u32 mask = 0;
+        int mx = 0, my = 0;
+        for (char* t = strtok(names, " +,\r"); t; t = strtok(nullptr, " +,\r")) {
+            if (!_stricmp(t, "RSLEFT")) mask |= 1u << 16;
+            if (!_stricmp(t, "RSRIGHT")) mask |= 1u << 17;
+            if (!_stricmp(t, "RSUP")) mask |= 1u << 18;
+            if (!_stricmp(t, "RSDOWN")) mask |= 1u << 19;
+            if (!_strnicmp(t, "MX", 2)) mx = atoi(t + 2);
+            if (!_strnicmp(t, "MY", 2)) my = atoi(t + 2);
             for (auto& bn : g_btn_names)
                 if (!_stricmp(t, bn.name)) mask |= 1u << bn.bit;
-        g_script.push_back({a, b, mask});
+        }
+        g_script.push_back({a, b, mask, mx, my});
     }
     fclose(f);
 }
@@ -102,10 +111,16 @@ int plat_scan_key() {
 static bool game_has_focus() { return g_hwnd && GetForegroundWindow() == g_hwnd && !ui_menu_open(); }
 
 void plat_input_poll() {
-    u16 down = 0;
+    u32 sdown = 0;
+    int smx = 0, smy = 0;
     for (auto& s : g_script)
-        if (g_frame >= s.from && g_frame <= s.to) down |= s.mask;
+        if (g_frame >= s.from && g_frame <= s.to) { sdown |= s.mask; smx += s.mx; smy += s.my; }
+    u16 down = (u16)sdown;
     u8 ax[4] = {128, 128, 128, 128};   // RX, RY, LX, LY
+    if (sdown & (1u << 16)) ax[0] = 0;
+    if (sdown & (1u << 17)) ax[0] = 255;
+    if (sdown & (1u << 18)) ax[1] = 0;
+    if (sdown & (1u << 19)) ax[1] = 255;
     bool focus = !g_cfg.headless && game_has_focus();
     if (focus) {
         for (int b = 0; b < 16; b++)
@@ -202,11 +217,18 @@ void plat_input_poll() {
                 if (sx) ax[2] = (u8)(128 - sx);
                 if (sy) ax[3] = (u8)(128 + k * sy);
             }
+        } else if (g_cfg.mouse_direct_cam) {
+            // third person: hand the raw counts to the camera hook (game_c12.cpp), which turns the
+            // game's camera by exactly that much on its next update
+            g_cam_mx += dx * (g_cfg.mouse_invert_x ? -1 : 1);
+            g_cam_my += dy * (g_cfg.mouse_invert_y ? -1 : 1);
+            g_mx_f = g_my_f = 0;
         } else {
             if (sx) ax[0] = (u8)(128 + sx);
             if (sy) ax[1] = (u8)(128 + sy);
         }
     } else g_mouse_dx = g_mouse_dy = 0;
+    if (g_cfg.mouse_direct_cam && !(down & (1u << 9))) { g_cam_mx += smx; g_cam_my += smy; }   // scripted mouse (tests)
     g_pad_state[0] = (u16)~down;
     memcpy(g_pad_axes[0], ax, 4);
 }

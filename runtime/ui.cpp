@@ -89,7 +89,7 @@ void settings_save(const char* path) {
     fprintf(f, "fps60=%d            # EXPERIMENTAL 50 fps (game runs 2x fast)\n\n# --- audio ---\n", c.fps60);
     fprintf(f, "volume=%.2f\naudio_interp=%d     # 0 nearest, 1 linear, 2 console-like, 3 cubic\nreverb=%d\naudio_latency_ms=%d\n\n# --- input ---\n",
             c.volume, c.audio_interp, c.reverb, c.audio_latency_ms);
-    fprintf(f, "mouse=%d\nmouse_sens=%.2f\nmouse_invert_x=%d\nmouse_invert_y=%d\nmouse_aim_invert=%d\nmouse_direct_aim=%d\npause_in_menu=%d\n", c.mouse, c.mouse_sens, c.mouse_invert_x, c.mouse_invert_y, c.mouse_aim_invert, c.mouse_direct_aim, c.pause_in_menu);
+    fprintf(f, "mouse=%d\nmouse_sens=%.2f\nmouse_invert_x=%d\nmouse_invert_y=%d\nmouse_aim_invert=%d\nmouse_direct_aim=%d\nmouse_direct_cam=%d\npause_in_menu=%d\n", c.mouse, c.mouse_sens, c.mouse_invert_x, c.mouse_invert_y, c.mouse_aim_invert, c.mouse_direct_aim, c.mouse_direct_cam, c.pause_in_menu);
     fprintf(f, "# key bindings: Windows virtual-key codes, two per button (0 = none)\n");
     for (int i = 0; i < 16; i++) fprintf(f, "bind_%s=%d,%d\n", g_btn_key[i], c.binds[i][0], c.binds[i][1]);
     fprintf(f, "\n# --- misc ---\nmods=%s\nlog=%d\n", c.moddir.c_str(), g_log_level);
@@ -196,6 +196,7 @@ static void draw_menu() {
             b = g_cfg.mouse_invert_x; if (ImGui::Checkbox("Invert mouse X", &b)) g_cfg.mouse_invert_x = b;
             ImGui::SameLine();
             b = g_cfg.mouse_invert_y; if (ImGui::Checkbox("Invert mouse Y", &b)) g_cfg.mouse_invert_y = b;
+            b = g_cfg.mouse_direct_cam; if (ImGui::Checkbox("Raw mouse camera in third-person view (no stick emulation)", &b)) g_cfg.mouse_direct_cam = b;
             b = g_cfg.mouse_direct_aim; if (ImGui::Checkbox("True mouse aim in first-person view (1:1, no stick emulation)", &b)) g_cfg.mouse_direct_aim = b;
             b = g_cfg.mouse_aim_invert; if (ImGui::Checkbox("Invert vertical aim in first-person view", &b)) g_cfg.mouse_aim_invert = b;
             ImGui::TextDisabled("Mouse wheel = cycle weapons. Controllers (XInput) always work.");
