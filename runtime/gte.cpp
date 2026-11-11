@@ -511,9 +511,20 @@ void gte_ctc2(Ctx* c, int reg, u32 v) {
     C[reg] = (s32)v;
 }
 
+// Screen positions the game reads back into a CPU register (instead of storing them straight into a
+// polygon): that is how it places 2D markers on 3D things - the lock-on bracket, pickup labels. The
+// widescreen HUD layout keeps elements sitting on such a point where they are (gpu.cpp layout_2d).
+SxyMark g_sxy_marks[128];
+int g_sxy_mark_n;
+
 // ---- PGXP register plumbing -------------------------------------------
 extern "C" {
 void pgxp_mfc2(Ctx* c, int rt, int reg) {
+    if (reg >= 12 && reg <= 15) {
+        u32 v = c->r[rt];
+        SxyMark& m = g_sxy_marks[g_sxy_mark_n++ & 127];
+        m.x = (s16)(v & 0xFFFF); m.y = (s16)(v >> 16); m.frame = g_frame;
+    }
     if (reg >= 12 && reg <= 15) c->preg[rt] = c->pgte[reg == 15 ? 2 : reg - 12];
     else c->preg[rt].val = ~c->r[rt];
 }
