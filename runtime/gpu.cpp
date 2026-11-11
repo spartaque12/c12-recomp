@@ -110,8 +110,11 @@ static int g_clip_l, g_clip_r;
 static bool g_collect_3d;              // the list being examined contains real 3D polygons
 static int g_last_pgxp_frame = -100;   // last frame that drew real 3D geometry
 
-static bool prim_2d(int x0, int y0, int x1, int y1) {
+static std::vector<u8> g_box3d;        // per collected primitive: it is projected 3D geometry, leave it alone
+static bool g_world_layout;            // the list being laid out is the world list (3D plus maybe a 2D panel)
+static bool prim_2d(int x0, int y0, int x1, int y1, bool is3d = false) {
     if (g_collect) {
+        g_box3d.push_back(is3d);
         if (g_boxes.empty()) { g_clip_l = g_st.cx1; g_clip_r = g_st.cx2 + 1; }   // the list sets its own drawing area
         g_boxes.push_back({x0, y0, x1, y1});
         return true;
@@ -128,7 +131,7 @@ static bool prim_2d(int x0, int y0, int x1, int y1) {
 static void layout_2d(float k) {
     size_t n = g_boxes.size();
     g_tf.assign(n, Tf{0, 1});
-    if (n == 0 || n > 1500) return;
+    if (n == 0 || n > 3000) return;
     // a list that clips itself to a small window (the scope's info line) is laid out against the
     // screen area the previous lists used
     static int scr_l = 0, scr_r = 0;
@@ -141,8 +144,10 @@ static void layout_2d(float k) {
     auto big = [&](const Box& b) { return b.x1 - b.x0 >= 160; };
     for (size_t i = 0; i < n; i++) {
         const Box& a = g_boxes[i];
+        if (g_box3d[i]) continue;
         for (size_t j = i + 1; j < n; j++) {
             const Box& b = g_boxes[j];
+            if (g_box3d[j]) continue;
             if (big(a) != big(b)) continue;
             int ox = std::min(a.x1, b.x1) - std::max(a.x0, b.x0), oy = std::min(a.y1, b.y1) - std::max(a.y0, b.y0);
             bool join;
@@ -178,7 +183,15 @@ static void layout_2d(float k) {
         }
         return Tf{a, k};
     };
-    for (size_t i = 0; i < n; i++) if (find((int)i) == (int)i) gt[i] = place(gb[i]);
+    for (size_t i = 0; i < n; i++) if (find((int)i) == (int)i && !g_box3d[i]) gt[i] = place(gb[i]);
+    // The world list is only touched while a 2D panel is drawn into it (inventory, map): without one,
+    // its 2D pieces are effects tied to the 3D scene and stay as they are.
+    if (g_world_layout) {
+        bool panel = false;
+        for (size_t i = 0; i < n; i++)
+            if (find((int)i) == (int)i && !g_box3d[i] && gt[i].k != 1.0f && gb[i].x1 - gb[i].x0 >= W / 2 && gb[i].y1 - gb[i].y0 >= 100) panel = true;
+        if (!panel) return;
+    }
     // small elements sitting on a panel move with the panel
     for (size_t i = 0; i < n; i++) {
         if (find((int)i) != (int)i || big(g_boxes[i])) continue;
@@ -202,7 +215,7 @@ static void layout_2d(float k) {
             if (best < 0 || area < best) { best = area; gt[i] = gt[j]; }
         }
     }
-    for (size_t i = 0; i < n; i++) g_tf[i] = gt[find((int)i)];
+    for (size_t i = 0; i < n; i++) g_tf[i] = g_box3d[i] ? Tf{0, 1} : gt[find((int)i)];
     if (g_log_level >= 3 && (g_frame % 100) == 0)
         for (size_t i = 0; i < n; i++) if (find((int)i) == (int)i)
             logf("  2D group %d..%d x %d..%d -> anchor %.0f k %.2f (clip %d..%d)\n", gb[i].x0, gb[i].x1, gb[i].y0, gb[i].y1, gt[i].a, gt[i].k, L, R);
@@ -273,7 +286,10 @@ static void draw_polygon() {
         // which is affine by construction. Rebuild each midpoint as the projection of the true 3D
         // midpoint of its two parents: position weighted by depth, depth averaged. The pieces then
         // render exactly like the unsplit, perspective-correct polygon.
-        if (got < n) {
+        // Not for flat-drawn 2D shapes that merely lie in the world list (the map's scroll arrows):
+        // untextured and without a single projected vertex, their corners would be "rebuilt" from
+        // whatever 3D edge happens to pass under them and be dragged along it.
+        if (got < n && (tex || got > 0)) {
             auto remember = [&](int k) {
                 for (int a = 0; a < g_sub_n; a++)
                     if (g_sub[a].x == v[k].x && g_sub[a].y == v[k].y && g_sub[a].u == v[k].u && g_sub[a].v == v[k].v) return;
@@ -345,7 +361,7 @@ static void draw_polygon() {
     {
         int x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
         for (int k = 1; k < n; k++) { x0 = std::min(x0, v[k].x); x1 = std::max(x1, v[k].x); y0 = std::min(y0, v[k].y); y1 = std::max(y1, v[k].y); }
-        if (prim_2d(x0, y0, x1, y1)) return;
+        if (prim_2d(x0, y0, x1, y1, pg_kind != 0)) return;
     }
     if (g_dbg_file) {
         fprintf(g_dbg_file, "poly %02x ot %d pgxp %d tp %d,%d semi %d:", cmd, g_ot_index, pg_kind, g_st.tpx, g_st.tpy, (int)g_st.semi);
@@ -656,6 +672,7 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
         if (is2d) {
             FrontState fs = {g_stat, g_st, g_off_x, g_off_y, {g_e1, g_e2, g_e3, g_e4, g_e5, g_e6}, g_fifo_n, g_fifo_need, g_poly_line, g_xfer_mode};
             g_boxes.clear();
+            g_box3d.clear();
             bool in_game = g_frame - g_last_pgxp_frame <= 6;
             g_collect_3d = false;
             g_collect = true;
@@ -664,7 +681,7 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
             // a big list during gameplay is 2D only when it holds no 3D at all (the game's second,
             // nearly empty list carries HUD text such as the scope's info line)
             if (g_log_level >= 3 && (g_frame % 100) == 0) logf("  collect: %d boxes, 3d=%d in_game=%d clip %d..%d\n", (int)g_boxes.size(), (int)g_collect_3d, (int)in_game, g_clip_l, g_clip_r);
-            if (slots > 64 && in_game && g_collect_3d) g_boxes.clear();
+            g_world_layout = slots > 64 && in_game && g_collect_3d;
             g_sub_n = 0;
             layout_2d(g_ws_scale);
             g_stat = fs.stat; g_st = fs.st; g_off_x = fs.offx; g_off_y = fs.offy;
