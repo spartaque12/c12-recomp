@@ -164,6 +164,18 @@ static void layout_2d(float k) {
         if (g.x0 <= L + 16 && g.x1 >= R - 16) return Tf{0, 1};
         // edge-anchored only when the whole element lives on that side; everything else is centred
         float a = g.x1 < L + 0.45f * W ? (float)L : g.x0 > L + 0.55f * W ? (float)R : (L + R) * 0.5f;
+        // Small elements away from the screen edges are markers the game puts on things in the 3D
+        // scene (the lock-on bracket on an enemy): they keep their proportions around their own
+        // centre, so they stay on their target. Real HUD sits within ~30 px of an edge and keeps its
+        // edge anchor; in between the anchor moves over smoothly, so nothing jumps.
+        if (g.x1 - g.x0 <= 120 && g.y1 - g.y0 <= 60) {
+            float dl = (float)(g.x0 - L), dr = (float)(R - g.x1);
+            float edge = dl < dr ? (float)L : (float)R, dist = dl < dr ? dl : dr;
+            float t = (dist - 30.0f) / 50.0f;
+            t = t < 0 ? 0 : t > 1 ? 1 : t;
+            float own = (g.x0 + g.x1) * 0.5f;
+            if (t > 0) a = edge + (own - edge) * t;
+        }
         return Tf{a, k};
     };
     for (size_t i = 0; i < n; i++) if (find((int)i) == (int)i) gt[i] = place(gb[i]);
