@@ -107,15 +107,12 @@ static std::vector<Tf> g_tf;
 static size_t g_tf_i;
 static bool g_tf_on;
 static int g_clip_l, g_clip_r;
-struct BoxAt { Box b; int frame; };
-static std::vector<BoxAt> g_box_hist;        // small 2D elements of the last few frames
-static int g_layout_off_x, g_layout_off_y;   // drawing offset of the list being laid out
 static bool g_collect_3d;              // the list being examined contains real 3D polygons
 static int g_last_pgxp_frame = -100;   // last frame that drew real 3D geometry
 
 static bool prim_2d(int x0, int y0, int x1, int y1) {
     if (g_collect) {
-        if (g_boxes.empty()) { g_clip_l = g_st.cx1; g_clip_r = g_st.cx2 + 1; g_layout_off_x = g_off_x; g_layout_off_y = g_off_y; }   // the list sets its own drawing area
+        if (g_boxes.empty()) { g_clip_l = g_st.cx1; g_clip_r = g_st.cx2 + 1; }   // the list sets its own drawing area
         g_boxes.push_back({x0, y0, x1, y1});
         return true;
     }
@@ -170,35 +167,6 @@ static void layout_2d(float k) {
         return Tf{a, k};
     };
     for (size_t i = 0; i < n; i++) if (find((int)i) == (int)i) gt[i] = place(gb[i]);
-    // Markers the game pins to a 3D point (lock-on bracket, pickup labels) must stay on that point:
-    // they keep their proportions around it instead of being pulled towards a screen edge.
-    for (size_t i = 0; i < n; i++) {
-        if (find((int)i) != (int)i || big(g_boxes[i]) || gt[i].k == 1.0f) continue;
-        const Box& g = gb[i];
-        if (g.x1 - g.x0 > 120 || g.y1 - g.y0 > 60) continue;
-        // an element that has not moved since the last game frame is only a marker if its point
-        // has not moved either; otherwise it is ordinary HUD that a 3D point happens to pass behind
-        bool was_here = false;
-        for (const BoxAt& h : g_box_hist)
-            if (h.frame < g_frame && h.b.x0 == g.x0 && h.b.x1 == g.x1 && h.b.y0 == g.y0 && h.b.y1 == g.y1) { was_here = true; break; }
-        int best = 1 << 30;
-        for (const SxyMark& m : g_sxy_marks) {
-            if (m.frame == 0 || g_frame - m.frame > 4) continue;
-            int mx = m.x + g_layout_off_x, my = m.y + g_layout_off_y;
-            // a marker is drawn around its point: the point lies in the middle part of the element
-            int gw = g.x1 - g.x0;
-            if (mx < g.x0 + gw / 5 || mx > g.x1 - gw / 5 || my < g.y0 - 12 || my > g.y1 + 12) continue;
-            if (was_here) {
-                bool still = false;
-                for (const SxyMark& o : g_sxy_marks)
-                    if (o.frame && o.frame < m.frame - 1 && m.frame - o.frame <= 6 && o.x == m.x && o.y == m.y) { still = true; break; }
-                if (!still) continue;
-            }
-            int d = abs(mx - (g.x0 + g.x1) / 2) + abs(my - (g.y0 + g.y1) / 2);
-            if (d < best) { best = d; gt[i].a = (float)mx; }
-        }
-        if (best != 1 << 30 && g_log_level >= 3) logf("frame %d: 2D marker %d..%d x %d..%d pinned at x %.0f\n", g_frame, g.x0, g.x1, g.y0, g.y1, gt[i].a);
-    }
     // small elements sitting on a panel move with the panel
     for (size_t i = 0; i < n; i++) {
         if (find((int)i) != (int)i || big(g_boxes[i])) continue;
@@ -209,9 +177,6 @@ static void layout_2d(float k) {
         }
     }
     for (size_t i = 0; i < n; i++) g_tf[i] = gt[find((int)i)];
-    g_box_hist.erase(std::remove_if(g_box_hist.begin(), g_box_hist.end(), [](const BoxAt& h) { return g_frame - h.frame > 6; }), g_box_hist.end());
-    for (size_t i = 0; i < n; i++)
-        if (find((int)i) == (int)i && !big(g_boxes[i]) && g_box_hist.size() < 512) g_box_hist.push_back(BoxAt{gb[i], g_frame});
     if (g_log_level >= 3 && (g_frame % 100) == 0)
         for (size_t i = 0; i < n; i++) if (find((int)i) == (int)i)
             logf("  2D group %d..%d x %d..%d -> anchor %.0f k %.2f (clip %d..%d)\n", gb[i].x0, gb[i].x1, gb[i].y0, gb[i].y1, gt[i].a, gt[i].k, L, R);

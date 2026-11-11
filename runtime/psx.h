@@ -109,9 +109,6 @@ void gpu_write_gp1(u32 v);
 void gpu_dma(u32 madr, u32 bcr, u32 chcr);
 void gpu_vblank();                       // present
 extern int g_frame;
-struct SxyMark { int x, y, frame; };     // a projected point the game read back for a 2D marker
-extern SxyMark g_sxy_marks[128];
-extern int g_sxy_mark_n;
 
 // ---- spu -------------------------------------------------------------
 void spu_init();
