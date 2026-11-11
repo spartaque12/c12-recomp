@@ -2,6 +2,7 @@
 // Mixing is done in float with selectable interpolation ("enhanced audio").
 #include "psx.h"
 #include <math.h>
+#include "savestate.h"
 
 static u8 g_sram[0x80000];
 FILE* g_wav;  // raw s16 stereo 44.1k dump (tests)
@@ -408,4 +409,18 @@ void spu_dma(u32 madr, u32 bcr, u32 chcr) {
 void spu_init() {
     for (auto& v : g_v) { v.phase = PH_OFF; v.on = false; v.pos = 28; }
     sched_set(EV_SPU, 33868, spu_event);
+}
+
+// ---- save states ---------------------------------------------------------------------------
+void spu_state(StateIO& s) {
+    s.tag("SPU_");
+    s.pod(g_sram); s.pod(g_reg);
+    s.pod(g_xfer_addr); s.pod(g_spucnt); s.pod(g_spustat);
+    s.pod(g_kon); s.pod(g_koff); s.pod(g_pmon); s.pod(g_non); s.pod(g_eon); s.pod(g_endx);
+    s.pod(g_irq_addr);
+    s.pod(g_v);
+    s.pod(g_noise); s.pod(g_noise_cnt);
+    s.pod(g_spu_time); s.pod(g_spu_frac);
+    s.pod(g_rv_base); s.pod(g_rv_cur); s.pod(g_rv_phase); s.pod(g_rv_out); s.pod(g_rv_in_acc);
+    s.pod(g_cd); s.pod(g_cd_r); s.pod(g_cd_w); s.pod(g_cd_started); s.pod(g_cd_hist); s.pod(g_cd_phase);
 }

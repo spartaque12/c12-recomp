@@ -9,8 +9,10 @@
 #include "c12_mod_api.h"
 #include "../third_party/imgui/imgui.h"
 #include <map>
+#include "savestate.h"
 
 static std::vector<void (*)(void)> g_frame_cbs;
+void mods_note_module(void* m);
 
 static void api_log(const char* msg) { logf("[mod] %s\n", msg); }
 static int api_hook(uint32_t addr, C12HookFn fn) { return hook_set(addr, (HookFn)fn) ? 1 : 0; }
@@ -18,6 +20,9 @@ static void api_call(uint32_t addr) { Ctx* c = &g_ctx; u32 ra = c->r[31]; guest_
 static uint32_t api_r32(uint32_t a) { return mem_r32(&g_ctx, a); }
 static void api_w32(uint32_t a, uint32_t v) { mem_w32(&g_ctx, a, v); }
 static void api_on_frame(void (*cb)(void)) { g_frame_cbs.push_back(cb); }
+static std::vector<void (*)(void)> g_loaded_cbs;
+static void api_on_state_loaded(void (*cb)(void)) { g_loaded_cbs.push_back(cb); }
+void mods_state_loaded() { for (auto cb : g_loaded_cbs) cb(); }
 static int api_override(const char* path, uint32_t off, const void* data, uint32_t len) { return cdrom_add_override(path, off, (const u8*)data, len); }
 
 // ---- mods in the settings menu ---------------------------------------------------------------------
@@ -167,6 +172,7 @@ void mods_init() {
     api.mouse_look = api_mouse_look;
     api.pad = api_pad;
     api.set_aim_origin = api_set_aim_origin;
+    api.on_state_loaded = api_on_state_loaded;
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA((dir + "\\*.dll").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -176,7 +182,18 @@ void mods_init() {
         auto init = m ? (int (*)(const C12ModApi*))GetProcAddress(m, "c12_mod_init") : nullptr;
         if (!init) { logf("mod: %s has no c12_mod_init export\n", full.c_str()); continue; }
         int r = init(&api);
+        mods_note_module(m);
         logf("mod: loaded %s (init=%d)\n", full.c_str(), r);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
+}
+
+// ---- save states ---------------------------------------------------------------------------
+// where the mod DLLs are loaded (a state holds return addresses into them)
+static std::vector<void*> g_mod_modules;
+void mods_note_module(void* m) { g_mod_modules.push_back(m); }
+int mods_module_list(void** bases, int max) {
+    int n = 0;
+    for (void* m : g_mod_modules) if (n < max) bases[n++] = m;
+    return n;
 }

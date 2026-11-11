@@ -12,6 +12,7 @@
 #include "../third_party/xxhash.h"
 #include <unordered_map>
 #include <algorithm>
+#include "savestate.h"
 
 struct RepName {
     u64 src_hash, pal_hash;
@@ -211,4 +212,12 @@ const HdSub* hdtex_lookup(const GpuState& s, int u0, int v0, int u1, int v1) {
         b->srv = n->srv;
     }
     return best;
+}
+
+// ---- save states ---------------------------------------------------------------------------
+// which VRAM areas hold which uploaded textures (replacement lookup); after the VRAM was restored
+void hdtex_state(StateIO& s) {
+    s.tag("HDTX");
+    s.vec(g_writes);
+    if (s.load) g_cache.clear();
 }

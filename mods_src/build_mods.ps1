@@ -1,4 +1,5 @@
 # Build every mods_src\*.c into mods\<name>.dll (MSVC x64).
+# /GS-: save states copy stacks that can hold a mod's frames, and a /GS frame checks a per-run cookie.
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $vs = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
@@ -15,7 +16,11 @@ $only = $args
 Get-ChildItem "$PSScriptRoot\*.c" | ForEach-Object {
     if ($only.Count -and ($only -notcontains $_.BaseName)) { return }
     $out = "$outdir\$($_.BaseName).dll"
-    & cl /nologo /LD /O2 /W3 "/I$root\runtime" $_.FullName "/Fo$root\build\mods\$($_.BaseName).obj" "/Fe$out" /link "/IMPLIB:$root\build\mods\$($_.BaseName).lib" | Out-Host
+    # a fixed load address (no ASLR), different for every mod: save states hold return addresses into
+    # mods, so they must sit at the same place in every run
+    $h = 0; foreach ($ch in $_.BaseName.ToCharArray()) { $h = ($h * 31 + [int]$ch) % 4093 }
+    $base = '0x{0:X}' -f ([int64]0x300000000 + [int64]$h * 0x1000000)
+    & cl /nologo /LD /O2 /GS- /W3 "/I$root\runtime" $_.FullName "/Fo$root\build\mods\$($_.BaseName).obj" "/Fe$out" /link "/IMPLIB:$root\build\mods\$($_.BaseName).lib" /DYNAMICBASE:NO "/BASE:$base" | Out-Host
     if ($LASTEXITCODE) { exit 1 }
     Write-Host "built $out"
 }

@@ -2,6 +2,7 @@
 #include "psx.h"
 #include <stdarg.h>
 #include <set>
+#include "savestate.h"
 
 extern "C" {
 u8 g_ram[RAM_SIZE + 16];
@@ -614,4 +615,42 @@ bool load_exe(const char* path) {
     fread(buf.data(), 1, buf.size(), f);
     fclose(f);
     return load_exe_mem(buf.data(), buf.size());
+}
+
+// ---- save states ---------------------------------------------------------------------------
+void core_state(StateIO& s) {
+    s.tag("CORE");
+    s.raw(g_ram, RAM_SIZE);
+    s.raw(g_scratch, sizeof g_scratch);
+    s.pod(g_ctx);
+    s.pod(g_istat); s.pod(g_imask);
+    s.pod(g_memctl); s.pod(g_ramsize);
+    s.pod(g_tick_base); s.pod(g_cyc_base); s.pod(g_bias_q8);
+    s.pod(g_ev_time); s.pod(g_ev_fn);   // function pointers: same c12.exe at the same address
+    s.pod(g_in_events); s.pod(g_in_exception);
+    s.pod(g_cs_boot); s.pod(g_cs_n);
+    // bound level overlays: (descriptor, base); their function tables are rebuilt
+    u32 n = (u32)g_active.size();
+    s.pod(n);
+    std::vector<ActiveOverlay> act;
+    for (u32 i = 0; i < n && s.ok; i++) {
+        u32 k = 0, base = 0;
+        if (!s.load) { k = (u32)(g_active[i].d - g_overlay_descs); base = g_active[i].base; }
+        s.pod(k); s.pod(base);
+        if (s.load) {
+            if (k >= g_overlay_desc_count) { s.ok = false; break; }
+            const OverlayDesc& d = g_overlay_descs[k];
+            ActiveOverlay a;
+            a.d = &d;
+            a.base = base;
+            a.tab.assign(d.size / 4 + 1, nullptr);
+            for (unsigned j = 0; j < d.count; j++) a.tab[d.funcs[j].addr >> 2] = d.funcs[j].fn;
+            act.push_back(std::move(a));
+        }
+    }
+    for (unsigned k = 0; k < g_overlay_desc_count; k++) s.pod(*g_overlay_descs[k].base);
+    if (s.load && s.ok) {
+        g_active = std::move(act);
+        memset(g_pgxp_mem, 0, (RAM_SIZE / 4) * sizeof(PgxpVal));   // precision data is rebuilt as the game runs
+    }
 }

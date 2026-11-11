@@ -536,6 +536,21 @@ static void physics_hook(uint32_t* r, C12OrigFn orig) {
     orig(r);
 }
 
+/* A save state was loaded: the view and the scope bookkeeping start again from the game's own camera. */
+static void state_loaded(void) {
+    if (look_valid && saved_ac2 >= 0) api->game_option("cam_autocenter", saved_ac2);   /* taken again on the next frame */
+    look_valid = 0;
+    look_turn = 0.0f;
+    look_set_pitch = 100000;
+    in_scope = 0;
+    scope_move = 0;
+    scope_entry_a = scope_last_a = -1;
+    last_view_a = -1;
+    vm_ok = 0;
+    saved_eye_vo = 0;
+    wall_c = -1;
+}
+
 __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     if (a->version < 2) return 0;
     api = a;
@@ -559,5 +574,6 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("vm_yaw", "Weapon: turn (degrees)", &vm_yaw, -180.0f, 180.0f);
     api->setting_float("vm_pitch", "Weapon: tilt (degrees)", &vm_pitch, -90.0f, 90.0f);
     api->hook(0x8005f380, sfx_hook);
+    if (api->version >= 3) api->on_state_loaded(state_loaded);
     return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook) && api->hook(0x8002c048, physics_hook) && api->hook(0x8003836c, render_hook) && api->hook(0x8002bb90, move_prep_hook) && api->hook(0x80022154, run_hook);
 }

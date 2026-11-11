@@ -5,6 +5,7 @@
 // So the file API below is a small implementation of the real card file system on that image.
 #include "psx.h"
 #include <direct.h>
+#include "savestate.h"
 
 static const char* SAVEDIR = "saves";
 static const char* CARDFILE = "saves/card1.mcd";
@@ -300,4 +301,12 @@ bool bios_file_call(Ctx* c, int fn) {
     }
     v0 = (u32)-1;
     return true;
+}
+
+// ---- save states ---------------------------------------------------------------------------
+// The card's contents are not part of a state (games saved on it stay); only open files are.
+void memcard_state(StateIO& s) {
+    s.tag("MCRD");
+    s.pod(g_fd);
+    s.str(g_find_pat); s.pod(g_find_dirent); s.pod(g_find_i);
 }

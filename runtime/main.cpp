@@ -5,6 +5,7 @@
 #include <commdlg.h>
 #include "gpu.h"
 #include "ui.h"
+#include "savestate.h"
 #include <direct.h>
 
 static void parse_kv(const std::string& k, const std::string& v) {
@@ -39,8 +40,10 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k == "ws_flags") { extern int g_ws_flags; g_ws_flags = atoi(v.c_str()); }
     else if (k == "aim_fix") { extern int g_aim_fix; g_aim_fix = atoi(v.c_str()); }
     else if (k == "store_watch") { extern u32 g_store_watch; g_store_watch = strtoul(v.c_str(), nullptr, 16) & 0x1FFFFF; }
-    else if (k == "bookmark") { extern int g_bookmark_frame; g_bookmark_frame = atoi(v.c_str()); }
-    else if (k == "goto") { extern int g_goto_frame; g_goto_frame = atoi(v.c_str()); }
+    else if (k == "load_state") { extern std::string g_state_file; g_state_file = v; }
+    else if (k == "state_file") { extern std::string g_state_file; g_state_file = v; }
+    else if (k == "save_state_at") { extern int g_state_save_frame; g_state_save_frame = atoi(v.c_str()); }
+    else if (k == "load_state_at") { extern int g_state_load_frame; g_state_load_frame = atoi(v.c_str()); }
     else if (k == "trace_fn") { extern u32 g_trace_fn; g_trace_fn = strtoul(v.c_str(), nullptr, 16); }
     else if (k == "dbg_skip") { extern int g_dbg_skip; g_dbg_skip = atoi(v.c_str()); }
     else if (k == "cam_log") { extern int g_cam_log; g_cam_log = atoi(v.c_str()); }
@@ -137,6 +140,16 @@ static bool pick_disc() {
 }
 
 int main(int argc, char** argv) {
+    // crashes: note the exception and where it happened in c12.log
+    SetUnhandledExceptionFilter([](EXCEPTION_POINTERS* e) -> LONG {
+        u64 a = (u64)e->ExceptionRecord->ExceptionAddress;
+        HMODULE m = nullptr;
+        char name[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)a, &m)) GetModuleFileNameA(m, name, MAX_PATH);
+        logf("CRASH: exception %08x at %p (%s+%llx), rsp %p, frame %d\n", (unsigned)e->ExceptionRecord->ExceptionCode, (void*)a, name,
+             (unsigned long long)(a - (u64)m), (void*)e->ContextRecord->Rsp, g_frame);
+        return EXCEPTION_CONTINUE_SEARCH;
+    });
     if (AttachConsole(ATTACH_PARENT_PROCESS)) freopen("CONOUT$", "w", stdout);   // keep logging when run from a terminal
     find_home();
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -188,7 +201,11 @@ int main(int argc, char** argv) {
         else logf("hardware renderer unavailable, using software\n");
     }
     logf("boot: pc=%08x sp=%08x\n", g_ctx.pc, g_ctx.r[29]);
-    guest_call(&g_ctx, g_ctx.pc);
-    logf("guest main returned\n");
+    // the game runs on its own coroutine stack so that save states can copy it (savestate.cpp)
+    state_run_game([](void*) {
+        guest_call(&g_ctx, g_ctx.pc);
+        logf("guest main returned\n");
+        exit(0);
+    });
     return 0;
 }

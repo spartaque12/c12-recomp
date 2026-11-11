@@ -1,6 +1,7 @@
 // CD-ROM controller + cue/bin disc image + XA-ADPCM decode.
 #include "psx.h"
 #include <deque>
+#include "savestate.h"
 
 // ---- disc image ------------------------------------------------------
 struct Track {
@@ -525,4 +526,27 @@ bool cdrom_add_override(const char* disc_path, u32 offset, const u8* data, u32 l
     memcpy(o.data.data() + (offset - first * 2048), data, len);
     g_overrides.push_back(std::move(o));
     return true;
+}
+
+// ---- save states ---------------------------------------------------------------------------
+void cdrom_state(StateIO& s) {
+    s.tag("CDRM");
+    s.deq(g_q);
+    s.pod(g_index); s.pod(g_int_en); s.pod(g_int_flag);
+    s.pod(g_param); s.pod(g_nparam);
+    s.pod(g_resp); s.pod(g_resp_n); s.pod(g_resp_pos);
+    s.pod(g_mode); s.pod(g_filter_file); s.pod(g_filter_chan);
+    s.pod(g_setloc); s.pod(g_cur); s.pod(g_setloc_pending);
+    s.pod(g_reading); s.pod(g_playing); s.pod(g_seeking); s.pod(g_motor); s.pod(g_muted);
+    s.pod(g_sector); s.pod(g_sectorbuf);
+    u32 n = (u32)g_sector_q.size();
+    s.pod(n);
+    if (s.load) { if (n > 4096) { s.ok = false; return; } g_sector_q.assign(n, std::vector<u8>()); }
+    for (auto& v : g_sector_q) s.vec(v);
+    s.pod(g_fifo); s.pod(g_fifo_len); s.pod(g_fifo_pos);
+    s.pod(g_last_hdr);
+    s.pod(g_pending_cmd); s.pod(g_cmd_busy);
+    s.pod(g_vol); s.pod(g_vol_pending);
+    s.pod(g_xa_hist);
+    s.pod(g_second_cmd);
 }

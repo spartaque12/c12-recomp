@@ -154,6 +154,12 @@ void pgxp_cache_next_frame() {
     g_mv_cur ^= 1;
     g_mv_gen[g_mv_cur]++;            // empties the table that now becomes "current"
 }
+// after a save state was loaded: nothing of the previous frames belongs to the new picture
+void gte_state_loaded() {
+    g_mv_gen[0]++;
+    g_mv_gen[1]++;
+    g_vc_cur++;
+}
 // record this projection and return last frame's position of the same vertex
 static void mv_track(u32 src, PgxpVal& pv) {
     pv.has_old = 0;

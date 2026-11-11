@@ -3,13 +3,16 @@
 // Fibres: the engine runs its scripts/entities as stack-copying coroutines with a hand-written
 // context switch (start 80035970, resume 80035a0c, yield 80035b64, exit-call 80035ae0). The guest
 // side effects (stack copy, register save areas, bookkeeping) are kept exactly as the original;
-// only the control transfer is replaced by native Win32 fibers, one per guest fibre.
+// only the control transfer is replaced by native coroutines, one per guest fibre, on stacks at fixed
+// addresses (costack.cpp) so that save states can copy them.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #include "psx.h"
 #include <unordered_map>
 #include <math.h>
+#include "costack.h"
+#include "savestate.h"
 
 #define G_FIBRE_BASE 0x800cb670u   // sp of the frame that started/resumed the running fibre
 #define G_FIBRE_CUR 0x800ef4c4u    // running fibre struct
@@ -18,14 +21,16 @@
 
 enum { FS_RUNNING, FS_YIELDED, FS_FINISHED, FS_EXITCALL };
 struct HostFibre {
-    void* handle = nullptr;
+    CoStack co;          // its native stack (pool index = stack slot)
+    bool live = false;
     HostFibre* resumer = nullptr;
     u32 guest = 0, entry = 0, exit_fn = 0, exit_arg = 0;
     int state = FS_RUNNING;
     u32 cs[4096];
     int cs_n = 0;
 };
-static HostFibre g_main_fibre;
+static HostFibre g_fpool[CO_SLOTS];   // [CO_MAIN_SLOT] = the game's main thread
+#define g_main_fibre g_fpool[CO_MAIN_SLOT]
 static HostFibre* g_cur_fibre = &g_main_fibre;
 static std::unordered_map<u32, HostFibre*> g_fibres;
 extern "C" { extern u32* g_cs; extern int g_cs_n; }
@@ -34,14 +39,15 @@ static inline u32 rd(u32 a) { return mem_r32(&g_ctx, a); }
 static inline void wr(u32 a, u32 v) { mem_w32(&g_ctx, a, v); }
 
 static void switch_to(HostFibre* t) {
-    g_cur_fibre->cs_n = g_cs_n;
+    HostFibre* from = g_cur_fibre;
+    from->cs_n = g_cs_n;
     g_cur_fibre = t;
     g_cs = t->cs;
     g_cs_n = t->cs_n;
-    SwitchToFiber(t->handle);
+    co_switch(&from->co, &t->co);
 }
 
-static void CALLBACK fibre_proc(void* p) {
+static void fibre_proc(void* p) {
     HostFibre* hf = (HostFibre*)p;
     Ctx* c = &g_ctx;
     c->r[31] = 0x80035a04;
@@ -54,8 +60,22 @@ static void CALLBACK fibre_proc(void* p) {
 static void destroy(HostFibre* hf) {
     auto it = g_fibres.find(hf->guest);
     if (it != g_fibres.end() && it->second == hf) g_fibres.erase(it);
-    DeleteFiber(hf->handle);
-    delete hf;
+    co_free(&hf->co);
+    hf->live = false;
+}
+
+static HostFibre* new_fibre(u32 guest, u32 entry) {
+    int slot = co_alloc_slot();
+    if (slot < 0) psx_fatal("too many fibres");
+    HostFibre* hf = &g_fpool[slot];
+    hf->live = true;
+    hf->guest = guest;
+    hf->entry = entry;
+    hf->exit_fn = hf->exit_arg = 0;
+    hf->state = FS_RUNNING;
+    hf->cs_n = 0;
+    co_create(&hf->co, slot, fibre_proc, hf);
+    return hf;
 }
 
 static void run_epilogue(Ctx* c) {
@@ -65,7 +85,7 @@ static void run_epilogue(Ctx* c) {
 }
 
 // back on the resumer's context after the fibre yielded / finished / exit-called
-static void CALLBACK fibre_proc(void* p);
+static void fibre_proc(void* p);
 
 static void after_switch(Ctx* c, HostFibre* hf) {
     for (;;) {
@@ -75,14 +95,11 @@ static void after_switch(Ctx* c, HostFibre* hf) {
             // 80035ae0(func, arg): the running fibre throws its stack away and continues as
             // func(arg) from the stack base. It is still the same fibre and may yield again, so
             // it gets a fresh native stack and keeps running.
-            void* old = hf->handle;
             { static int n; if (n++ < 5) logf("fibre %08x restarted as %08x(%08x)\n", hf->guest, hf->exit_fn, hf->exit_arg); }
             hf->entry = hf->exit_fn;
             hf->state = FS_RUNNING;
             hf->cs_n = 0;
-            hf->handle = CreateFiberEx(64 * 1024, 1024 * 1024, 0, fibre_proc, hf);
-            if (!hf->handle) psx_fatal("CreateFiber failed");
-            DeleteFiber(old);
+            co_create(&hf->co, hf->co.slot, fibre_proc, hf);   // the old stack is abandoned: start afresh in the same slot
             c->r[4] = hf->exit_arg;
             switch_to(hf);
             continue;   // back here when it yields or finishes
@@ -125,17 +142,9 @@ static void hook_fibre_start(Ctx* c, RecompFn) {
     c->r[4] = rd(sp + 12);
 
     auto old = g_fibres.find(f);
-    if (old != g_fibres.end()) {  // struct reused while its previous incarnation was parked
-        DeleteFiber(old->second->handle);
-        delete old->second;
-        g_fibres.erase(old);
-    }
-    HostFibre* hf = new HostFibre;
-    hf->guest = f;
-    hf->entry = rd(sp + 8);
+    if (old != g_fibres.end()) destroy(old->second);   // struct reused while its previous incarnation was parked
+    HostFibre* hf = new_fibre(f, rd(sp + 8));
     hf->resumer = g_cur_fibre;
-    hf->handle = CreateFiberEx(64 * 1024, 1024 * 1024, 0, fibre_proc, hf);
-    if (!hf->handle) psx_fatal("CreateFiber failed");
     g_fibres[f] = hf;
     switch_to(hf);
     after_switch(c, hf);
@@ -193,6 +202,62 @@ static void hook_fibre_exitcall(Ctx* c, RecompFn) {
     psx_fatal("dead fibre resumed");
 }
 
+// ---- save states ---------------------------------------------------------------------------
+// Every fibre's native stack is copied (from its saved stack pointer to the top of its slot) together
+// with its bookkeeping; the main thread (slot 0) is switched out in state_point() while this runs.
+CoStack* game_main_stack() { return &g_main_fibre.co; }
+static void fibre_io(StateIO& s, HostFibre* hf) {
+    s.pod(hf->guest); s.pod(hf->entry); s.pod(hf->exit_fn); s.pod(hf->exit_arg); s.pod(hf->state);
+    int res = hf->resumer ? hf->resumer->co.slot : -1;
+    s.pod(res);
+    if (s.load) hf->resumer = res >= 0 && res < CO_SLOTS ? &g_fpool[res] : nullptr;
+    s.pod(hf->cs_n);
+    s.raw(hf->cs, sizeof hf->cs);
+    uint64_t rsp = (uint64_t)hf->co.rsp;
+    s.pod(rsp);
+    uint64_t n = (uint64_t)(hf->co.hi - (uint8_t*)rsp);
+    s.pod(n);
+    if (s.load) {
+        if (rsp < (uint64_t)hf->co.lo || rsp + n != (uint64_t)hf->co.hi) { s.ok = false; return; }
+        hf->co.rsp = (void*)rsp;
+    }
+    s.raw((void*)rsp, (size_t)n);
+}
+void fibres_state(StateIO& s) {
+    s.tag("FIBR");
+    int cur = g_cur_fibre->co.slot;
+    s.pod(cur);
+    if (!s.load) {
+        int n = 0;
+        for (int i = 0; i < CO_SLOTS; i++) n += g_fpool[i].live;
+        s.pod(n);
+        for (int i = 0; i < CO_SLOTS; i++) {
+            if (!g_fpool[i].live) continue;
+            s.pod(i);
+            fibre_io(s, &g_fpool[i]);
+        }
+        return;
+    }
+    for (int i = 1; i < CO_SLOTS; i++) if (g_fpool[i].live) { co_free(&g_fpool[i].co); g_fpool[i].live = false; }
+    co_release_all_but_main();
+    g_fibres.clear();
+    int n = 0;
+    s.pod(n);
+    for (int k = 0; k < n && s.ok; k++) {
+        int i = -1;
+        s.pod(i);
+        if (i < 0 || i >= CO_SLOTS) { s.ok = false; break; }
+        HostFibre* hf = &g_fpool[i];
+        co_claim_slot(&hf->co, i);
+        hf->live = true;
+        fibre_io(s, hf);
+        if (i != CO_MAIN_SLOT) g_fibres[hf->guest] = hf;
+    }
+    if (cur < 0 || cur >= CO_SLOTS) { s.ok = false; return; }
+    g_cur_fibre = &g_fpool[cur];
+    g_cs = g_cur_fibre->cs;
+}
+
 // ---- frame pacing ----------------------------------------------------------------------------
 // libetc's VSync wait is a calibrated busy loop that times out on a faster CPU. Replace it by
 // skipping emulated time straight to the next event: no timeouts at any CPU speed, no host CPU burn.
@@ -201,56 +266,8 @@ void idle_until_event(Ctx* c) {
     if (c->cyc < c->evt) c->cyc = c->evt;
     psx_events(c);
 }
-// ---- position bookmarks (testing aid; real save states are not possible: game objects run as native
-// coroutines whose progress lives on host stacks) -----------------------------------------------------
-// F6 appends the hero's level, position and facing to bookmarks.txt. --goto FRAME places the hero at
-// the last bookmark at that frame (same level only). The hero object is at 800efdb8: world MATRIX at
-// +0x14 (position s32 at +0x28), physics body at *(hero+0x9c) (position 20.12 fixed at +8/+0xc/+0x10,
-// s16 copy at +0x20), 16-bit position copies at +0x3c/+0x40/+0x44/+0x48, facing copies as below.
-const char* overlay_current_name();
-void ui_notify(const char* text);
-int g_bookmark_frame = -1;   // test runs: --bookmark FRAME saves a bookmark at that frame
-int g_bookmark_request;
-int g_goto_frame = -1;
-static const int k_face_hero[] = {0x116, 0x118, 0x11e, 0x120, 0x126, 0x128, 0x12e, 0x130, 0x154};
-static const int k_face_ctl[] = {0x50, 0x5c, 0x68, 0x74, 0xa8};
-static void bookmark_save(Ctx* c) {
-    u32 hero = mem_r32(c, 0x800efdb8);
-    if ((hero >> 24) != 0x80) { ui_notify("no hero to bookmark"); return; }
-    int x = (s32)mem_r32(c, hero + 0x28), y = (s32)mem_r32(c, hero + 0x2c), z = (s32)mem_r32(c, hero + 0x30);
-    int a = mem_r16(c, hero + 0x118) & 0xfff;
-    FILE* f = fopen("bookmarks.txt", "a");
-    if (f) { fprintf(f, "%s %d %d %d %d\n", overlay_current_name(), x, y, z, a); fclose(f); }
-    logf("bookmark: %s %d %d %d %d\n", overlay_current_name(), x, y, z, a);
-    ui_notify("position bookmarked (bookmarks.txt)");
-}
-static void bookmark_goto(Ctx* c) {
-    char lvl[64] = "", line[256];
-    int x = 0, y = 0, z = 0, a = 0, ok = 0;
-    FILE* f = fopen("bookmarks.txt", "r");
-    if (f) { while (fgets(line, sizeof line, f)) if (sscanf(line, "%63s %d %d %d %d", lvl, &x, &y, &z, &a) == 5) ok = 1; fclose(f); }
-    u32 hero = mem_r32(c, 0x800efdb8);
-    if (!ok || (hero >> 24) != 0x80) { logf("goto: no bookmark or no hero\n"); return; }
-    if (strcmp(lvl, overlay_current_name())) logf("goto: bookmark is in level %s, current level is %s\n", lvl, overlay_current_name());
-    const int p[3] = {x, y, z};
-    u32 body = mem_r32(c, hero + 0x9c);
-    for (int i = 0; i < 3; i++) {
-        mem_w32(c, hero + 0x28 + i * 4, (u32)p[i]);
-        if ((body >> 24) == 0x80) { mem_w32(c, body + 8 + i * 4, (u32)(p[i] << 12)); mem_w16(c, body + 0x20 + i * 2, (u32)(u16)(s16)p[i]); }
-    }
-    mem_w16(c, hero + 0x3c, (u32)(u16)(s16)x); mem_w16(c, hero + 0x44, (u32)(u16)(s16)x);
-    mem_w16(c, hero + 0x40, (u32)(u16)(s16)z); mem_w16(c, hero + 0x48, (u32)(u16)(s16)z);
-    for (int o : k_face_hero) mem_w16(c, hero + o, (u32)a);
-    u32 ctl = mem_r32(c, hero + 0xb0);
-    if ((ctl >> 24) == 0x80) for (int o : k_face_ctl) mem_w16(c, ctl + o, (u32)a);
-    if ((body >> 24) == 0x80) mem_w16(c, body + 0x1a, (u32)a);
-    logf("goto: hero placed at %s %d %d %d facing %d (frame %d)\n", lvl, x, y, z, a, g_frame);
-}
-
 static void hook_vsync_wait(Ctx* c, RecompFn) {
-    if (g_bookmark_frame >= 0 && g_frame >= g_bookmark_frame) { g_bookmark_frame = -1; g_bookmark_request = 1; }
-    if (g_bookmark_request) { g_bookmark_request = 0; bookmark_save(c); }
-    if (g_goto_frame >= 0 && g_frame >= g_goto_frame) { g_goto_frame = -1; bookmark_goto(c); }
+    if (g_cur_fibre == &g_main_fibre) state_point();   // save / load states between frames
     s32 target = (s32)c->r[4];
     int guard = 0;
     while ((s32)rd(G_VCOUNT) < target) {
@@ -460,7 +477,7 @@ void game_init() {
     hook_set(0x80065db8, hook_frustum_corners);
     hook_set(0x800612b8, hook_relocate);
     hook_set(0x800a1128, hook_vsync_wait);
-    g_main_fibre.handle = ConvertThreadToFiber(nullptr);
+    g_main_fibre.live = true;
     g_cs = g_main_fibre.cs;
     hook_set(0x80035970, hook_fibre_start);
     hook_set(0x80035a0c, hook_fibre_resume);

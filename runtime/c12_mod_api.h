@@ -14,11 +14,15 @@
  *         r[2] = 99;          // e.g. change the return value
  *     }
  *     api->hook(0x80012345, my_hook);
+ *
+ * Build mods without stack protection (MSVC /GS-, see mods_src\build_mods.ps1): save states copy the
+ * game's stacks, which can hold your hook's frames, and a /GS frame checks a cookie that differs
+ * from run to run. A mod's own variables are not part of a save state.
  */
 #pragma once
 #include <stdint.h>
 
-#define C12_MOD_API_VERSION 2   /* check api->version >= the version your mod was written for */
+#define C12_MOD_API_VERSION 3   /* check api->version >= the version your mod was written for */
 
 #ifdef __cplusplus
 extern "C" {
@@ -65,6 +69,10 @@ typedef struct C12ModApi {
     uint32_t (*pad)(int* lx, int* ly);
     /* With "aim_to_view": where shots start (the mod's eye), set = 0 to use the view object's eye. */
     void (*set_aim_origin)(int set, int x, int y, int z);
+    /* ---- version 3 ---- */
+    /* Called right after a save state was loaded (the game's RAM and registers are those of the
+     * saved moment; a mod's own variables are not): drop anything remembered from before. */
+    void (*on_state_loaded)(void (*cb)(void));
 } C12ModApi;
 
 #ifdef __cplusplus

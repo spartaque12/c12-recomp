@@ -22,7 +22,7 @@ Optional: put a DuckStation-style HD texture pack into the `hd_textures` folder.
     .\build.ps1 -NoRecomp         # rebuild the runtime only
 
 Hotkeys: **Tab** = switch classic / remastered presentation, **F1** or **Esc** = settings menu (all options live,
-rebindable keys, save to `c12.ini`), **`** (hold) = fast-forward, **Alt+Enter** / **F11** = fullscreen, **F6** = save a position bookmark (bookmarks.txt; tests can return to it with `--goto FRAME`, same level only - real save states are not possible in this port).
+rebindable keys, save to `c12.ini`), **`** (hold) = fast-forward, **Alt+Enter** / **F11** = fullscreen, **F5** = save state, **F9** = load state, **F6** / **F7** = previous / next save state slot (1-9).
 
 Default keyboard + mouse (rebind in the menu, Controls tab): WASD or arrows = move, mouse = camera (right stick),
 left click or Space = attack / accept (Cross), right click = first-person view (R2), Left Shift or middle click =
@@ -41,7 +41,8 @@ C = L2, Enter = Start, G = Select. XInput pads work at the same time (analog sti
 | `runtime/gte.cpp` | GTE with PGXP + widescreen projection |
 | `runtime/gpu*.cpp`, `hdtex.cpp` | GPU front-end, D3D11 renderer, software reference renderer, HD textures |
 | `runtime/spu.cpp`, `cdrom.cpp`, `hw.cpp` | Sound, CD-ROM + XA, timers/DMA/pad |
-| `runtime/game_c12.cpp` | Game-specific glue: fibres → native fibers, frame pacing |
+| `runtime/game_c12.cpp` | Game-specific glue: fibres → native coroutines, frame pacing |
+| `runtime/savestate.cpp`, `costack.cpp`, `ctxswitch.asm` | Save states; coroutine stacks at fixed addresses |
 | `runtime/mods.cpp`, `c12_mod_api.h` | Mod loader and native mod API |
 | `re/main_decomp.c` | Ghidra decompilation of the EXE (reference for modding) |
 
@@ -76,3 +77,7 @@ C = L2, Enter = Start, G = Select. XInput pads work at the same time (analog sti
 * `texpage-*` and `vram-write-*` replacement images are not used (only `texupload-*`).
 * Mask-bit test (rarely used GPU feature) is not implemented in the D3D11 renderer.
 * Debug: `--headless --hw --frames N --shots DIR --every K --input script.txt` runs scripted tests.
+* Save states (`states\slotN.c12s`) hold the whole running game, including the native stacks of its coroutines, so a
+  state only loads into the same build of c12.exe with the same mods: rebuilding makes older states unusable.
+  Loading a state does not touch the memory card. Tests: `--load_state FILE`, or `--state_file FILE` with
+  `--save_state_at FRAME` / `--load_state_at FRAME`. Mods must be built with `/GS-` (see `c12_mod_api.h`).

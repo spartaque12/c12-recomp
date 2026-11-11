@@ -7,6 +7,7 @@
 #include <mmsystem.h>
 #include "gpu.h"
 #include "ui.h"
+#include "savestate.h"
 #include <deque>
 
 HWND g_hwnd;
@@ -353,6 +354,12 @@ void plat_audio_push(const float* lr, int frames) {
     }
 }
 
+// after a save state was loaded: drop what was queued from the old game
+void plat_audio_reset() {
+    if (g_src) { g_src->Stop(); g_src->FlushSourceBuffers(); g_src->Start(); }
+    g_abuf_fill = 0;
+}
+
 // ---- window ----------------------------------------------------------------
 void plat_toggle_fullscreen() {
     static WINDOWPLACEMENT prev = {sizeof prev};
@@ -417,7 +424,15 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         else if (w == VK_TAB) settings_toggle_classic();
         else if (w == VK_OEM_3) g_turbo = true;
         else if (w == VK_F11) plat_toggle_fullscreen();
-        else if (w == VK_F6) { extern int g_bookmark_request; g_bookmark_request = 1; }
+        else if (w == VK_F5) state_request_save(state_quick_path());
+        else if (w == VK_F9) state_request_load(state_quick_path());
+        else if (w == VK_F6 || w == VK_F7) {   // previous / next save state slot (1..9)
+            extern int g_state_slot;
+            g_state_slot = w == VK_F7 ? g_state_slot % 9 + 1 : (g_state_slot + 7) % 9 + 1;
+            char msg[48];
+            snprintf(msg, sizeof msg, "save state slot %d", g_state_slot);
+            ui_notify(msg);
+        }
         return 0;
     case WM_KEYUP:
         if (w == VK_OEM_3) g_turbo = false;

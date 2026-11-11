@@ -1,5 +1,6 @@
 // Timers, DMA, SIO (pads), MDEC stub.
 #include "psx.h"
+#include "savestate.h"
 
 // =====================================================================
 // Root counters
@@ -355,3 +356,14 @@ bool bios_pad_poll(int port, u8* buf, int len) {
 }
 
 void sio_init() { g_sio_state = 0; }
+
+// ---- save states ---------------------------------------------------------------------------
+void hw_state(StateIO& s) {
+    s.tag("HWIO");
+    s.pod(g_tm); s.pod(g_dot_div);
+    s.pod(g_dma_madr); s.pod(g_dma_bcr); s.pod(g_dma_chcr); s.pod(g_dpcr); s.pod(g_dicr);
+    s.pod(g_pad);
+    s.pod(g_sio_ctrl); s.pod(g_sio_mode); s.pod(g_sio_baud); s.pod(g_sio_stat);
+    s.pod(g_sio_rx); s.pod(g_sio_rx_ready); s.pod(g_sio_state); s.pod(g_sio_cmd);
+    s.pod(g_sio_resp); s.pod(g_sio_len); s.pod(g_sio_in);
+}

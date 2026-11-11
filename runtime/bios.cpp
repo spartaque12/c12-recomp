@@ -2,6 +2,7 @@
 #include "psx.h"
 #include <setjmp.h>
 #include <string>
+#include "savestate.h"
 
 #define A0 c->r[4]
 #define A1 c->r[5]
@@ -488,4 +489,17 @@ void bios_init() {
     wr32(0x80000060, 0x00000002);
     wr32(0x80000064, 0x00000000);
     wr32(0x80000068, 0x000000FF);
+}
+
+// ---- save states ---------------------------------------------------------------------------
+void bios_state(StateIO& s) {
+    s.tag("BIOS");
+    s.pod(g_ev);
+    s.pod(g_entry_int);
+    s.pod(g_exc_jmp); s.pod(g_exc_active); s.pod(g_exc_saved);
+    s.pod(g_rcnt_autoack); s.pod(g_pad_autoack); s.pod(g_pad_started);
+    s.pod(g_pad_buf); s.pod(g_pad_len); s.pod(g_pad_old_buf);
+    s.pod(g_heap_base); s.pod(g_heap_size);
+    s.pod(g_rand_seed);
+    s.pod(g_intrp_head);
 }

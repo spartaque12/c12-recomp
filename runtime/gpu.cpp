@@ -2,6 +2,7 @@
 #include "gpu.h"
 #include "ui.h"
 #include <algorithm>
+#include "savestate.h"
 
 static GpuBackend* g_be = &g_sw_backend;
 void gpu_set_backend(GpuBackend* b) { g_be = b; }
@@ -969,4 +970,34 @@ void gpu_init() {
     gpu_write_gp1(0);
     g_stat |= 0x100000;  // PAL console
     sched_set(EV_GPU_LINE, 2168, line_event);
+}
+
+// ---- save states ---------------------------------------------------------------------------
+// VRAM is taken from the renderer (it holds what was drawn, not just what was uploaded) together with
+// the CPU-side copy of uploads (used to recognise HD textures).
+void gpu_state(StateIO& s) {
+    s.tag("GPU_");
+    s.pod(g_stat); s.pod(g_st); s.pod(g_off_x); s.pod(g_off_y); s.pod(g_tex_disable_allowed);
+    s.pod(g_e1); s.pod(g_e2); s.pod(g_e3); s.pod(g_e4); s.pod(g_e5); s.pod(g_e6);
+    s.pod(g_disp_x); s.pod(g_disp_y); s.pod(g_h1); s.pod(g_h2); s.pod(g_v1); s.pod(g_v2);
+    s.pod(g_gpuread);
+    s.pod(g_fifo); s.pod(g_fifo_addr); s.pod(g_fifo_n); s.pod(g_fifo_need); s.pod(g_src_addr);
+    s.pod(g_xfer_mode); s.pod(g_xfer_x); s.pod(g_xfer_y); s.pod(g_xfer_w); s.pod(g_xfer_h); s.pod(g_xfer_pos);
+    s.vec(g_xfer_buf);
+    s.pod(g_poly_line); s.pod(g_pl_prev); s.pod(g_pl_gouraud); s.pod(g_pl_first); s.pod(g_pl_expect_color); s.pod(g_pl_color);
+    s.pod(g_line); s.pod(g_field); s.pod(g_line_frac);
+    std::vector<u16> vram(1024 * 512);
+    if (!s.load) g_be->download(0, 0, 1024, 512, vram.data());
+    s.raw(vram.data(), vram.size() * 2);
+    std::vector<u16> shadow(g_vram, g_vram + 1024 * 512);
+    s.raw(shadow.data(), shadow.size() * 2);
+    if (s.load && s.ok) {
+        GpuState st = {};
+        st.cx2 = 1023;
+        st.cy2 = 511;
+        g_be->upload(0, 0, 1024, 512, vram.data(), st);
+        memcpy(g_vram, shadow.data(), shadow.size() * 2);
+        g_scope_flag_frame = g_scope_seen = -100;
+        g_last_pgxp_frame = -100;
+    }
 }

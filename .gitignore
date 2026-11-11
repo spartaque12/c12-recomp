@@ -16,4 +16,4 @@ vid/
 mods/*.dll
 *.bak
 *.obj
-bookmarks.txt
+states/
