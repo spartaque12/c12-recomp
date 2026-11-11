@@ -385,7 +385,14 @@ static void log_shot(Ctx* c, u32 obj, const char* tag) {
     for (int i = 0; i < 3; i++) { double q = p[i] - (e[i] + f[i] * t); d += q * q; }
     logf("shot %s frame %d: end %.0f,%.0f,%.0f  %.0f along the view, %.1f off the centre line\n", tag, g_frame, p[0], p[1], p[2], t, sqrt(d));
 }
-static void hook_fire(Ctx* c, RecompFn orig) {
+// The grenade launcher (80073804, the second fire) launches a projectile from the muzzle instead of
+// tracing: from the eye it would start inside the hero and blow up on him, so it starts this far in
+// front of the eye along the view.
+static const double GRENADE_FWD = 300.0;
+static void fire_aimed(Ctx* c, RecompFn orig, double fwd);
+static void hook_fire(Ctx* c, RecompFn orig) { fire_aimed(c, orig, 0.0); }
+static void hook_fire_grenade(Ctx* c, RecompFn orig) { fire_aimed(c, orig, GRENADE_FWD); }
+static void fire_aimed(Ctx* c, RecompFn orig, double fwd) {
     u32 obj = mem_r32(c, 0x800efdc8);
     bool scope = (mem_r32(c, 0x800efdfc) & 0x400) || (s16)mem_r16(c, 0x800f0ca4) == 1;
     u32 st = (obj >> 24) == 0x80 ? mem_r32(c, obj + 0xbc) : 0;
@@ -399,14 +406,14 @@ static void hook_fire(Ctx* c, RecompFn orig) {
     for (int i = 0; i < 9; i++) { m[i] = (s16)mem_r16(c, vo + 0x0c + i * 2) / 4096.0; mem_w16(c, obj + 0x14 + i * 2, mem_r16(c, vo + 0x0c + i * 2)); }
     for (int k = 0; k < 3; k++) off[k] = (s16)mem_r16(c, st + k * 2);   // muzzle, in the gun's own space
     for (int i = 0; i < 3; i++) {
-        double eye = g_aim_origin_set ? g_aim_origin[i] : (s32)mem_r32(c, vo + 0x20 + i * 4);
+        double eye = (g_aim_origin_set ? g_aim_origin[i] : (s32)mem_r32(c, vo + 0x20 + i * 4)) + m[i * 3 + 2] * fwd;
         double mo = m[i * 3 + 0] * off[0] + m[i * 3 + 1] * off[1] + m[i * 3 + 2] * off[2];
         mem_w32(c, obj + 0x28 + i * 4, (u32)(s32)lround(eye - mo));
     }
     // the firing code also uses the view's eye: it is the mod's eye for the duration of the call
     u32 eye_saved[3];
     for (int i = 0; i < 3; i++) eye_saved[i] = mem_r32(c, vo + 0x20 + i * 4);
-    if (g_aim_origin_set) for (int i = 0; i < 3; i++) mem_w32(c, vo + 0x20 + i * 4, (u32)g_aim_origin[i]);
+    if (g_aim_origin_set) for (int i = 0; i < 3; i++) mem_w32(c, vo + 0x20 + i * 4, (u32)(s32)lround(g_aim_origin[i] + m[i * 3 + 2] * fwd));
     orig(c);
     log_shot(c, obj, "(aimed)");
     for (int i = 0; i < 3; i++) mem_w32(c, vo + 0x20 + i * 4, eye_saved[i]);
@@ -447,7 +454,7 @@ static void hook_trace(Ctx* c, RecompFn orig) {
 void game_init() {
     hook_set(0x80073474, hook_fire);
     hook_set(0x8006c05c, hook_shot_target);
-    hook_set(0x80073804, hook_fire);
+    hook_set(0x80073804, hook_fire_grenade);
     if (g_trace_fn) hook_set(g_trace_fn, hook_trace);
     hook_set(0x80015b50, hook_cam_stick);
     hook_set(0x80065db8, hook_frustum_corners);
