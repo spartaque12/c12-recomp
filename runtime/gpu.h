@@ -18,6 +18,7 @@ struct GpuState {
     int tpx, tpy;            // texture page origin in VRAM
     int clutx, cluty;
     u8 tw_mask_x, tw_mask_y, tw_off_x, tw_off_y;
+    u8 xs_clip = 0;   // the clip window is part of a laid-out 2D element and moves with xs_a/xs_k
     int cx1, cy1, cx2, cy2;  // clip rectangle, inclusive
     bool set_mask, check_mask;
     // 2D layout correction (widescreen HUD): x2 = xs_a + (x - xs_a) * xs_k

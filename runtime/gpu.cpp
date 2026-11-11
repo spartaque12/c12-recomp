@@ -112,10 +112,15 @@ static int g_last_pgxp_frame = -100;   // last frame that drew real 3D geometry
 
 static std::vector<u8> g_box3d;        // per collected primitive: it is projected 3D geometry, leave it alone
 static bool g_world_layout;            // the list being laid out is the world list (3D plus maybe a 2D panel)
-static bool prim_2d(int x0, int y0, int x1, int y1, bool is3d = false) {
+static int g_clip_t, g_clip_b;
+static bool g_sub_window;              // the list being laid out draws into a window narrower than the screen
+struct Placed { Box b; Tf t; int frame; };
+static std::vector<Placed> g_placed;    // where the elements of the lists drawn so far ended up
+static int g_ot_slots_cur;             // ordering-table size of the list being walked
+static bool prim_2d(int x0, int y0, int x1, int y1, int is3d = 0) {
     if (g_collect) {
-        g_box3d.push_back(is3d);
-        if (g_boxes.empty()) { g_clip_l = g_st.cx1; g_clip_r = g_st.cx2 + 1; }   // the list sets its own drawing area
+        g_box3d.push_back((u8)is3d);
+        if (g_boxes.empty()) { g_clip_l = g_st.cx1; g_clip_r = g_st.cx2 + 1; g_clip_t = g_st.cy1; g_clip_b = g_st.cy2 + 1; }   // the list sets its own drawing area
         g_boxes.push_back({x0, y0, x1, y1});
         return true;
     }
@@ -124,6 +129,7 @@ static bool prim_2d(int x0, int y0, int x1, int y1, bool is3d = false) {
         g_tf_i++;
         g_st.xs_a = t.a;
         g_st.xs_k = t.k;
+        g_st.xs_clip = g_sub_window;
     }
     return false;
 }
@@ -132,12 +138,30 @@ static void layout_2d(float k) {
     size_t n = g_boxes.size();
     g_tf.assign(n, Tf{0, 1});
     if (n == 0 || n > 3000) return;
+    for (size_t i = 0; i < n; i++) if (g_box3d[i] == 2) g_box3d[i] = g_world_layout ? 1 : 0;   // deep slots: scene only in a real world list
     // a list that clips itself to a small window (the scope's info line) is laid out against the
     // screen area the previous lists used
     static int scr_l = 0, scr_r = 0;
-    if (g_clip_r - g_clip_l >= 200) { scr_l = g_clip_l; scr_r = g_clip_r; }
+    // (a window is anything clearly narrower than the screen area seen so far)
+    g_sub_window = scr_r - scr_l >= 200 && (g_clip_r - g_clip_l) * 10 < (scr_r - scr_l) * 9;
+    if (!g_sub_window && g_clip_r - g_clip_l >= 200) { scr_l = g_clip_l; scr_r = g_clip_r; }
     const int L = scr_l, R = scr_r, W = R - L;
     if (W < 200) return;
+    if (g_sub_window) {
+        // A list clipped to a small window is the contents of some box drawn by an earlier list
+        // (the scope's info line in its frame, the objectives list in the menu panel): everything
+        // in it moves exactly like that box. The backend moves the clip window the same way.
+        int cxm = (g_clip_l + g_clip_r) / 2;
+        Tf t = {g_clip_r < L + 0.45f * W ? (float)L : g_clip_l > L + 0.55f * W ? (float)R : (L + R) * 0.5f, k};
+        long best = -1;
+        for (const Placed& p : g_placed) {
+            if (g_frame - p.frame > 4 || cxm < p.b.x0 || cxm > p.b.x1 || p.b.y1 <= g_clip_t || p.b.y0 >= g_clip_b) continue;
+            long area = (long)(p.b.x1 - p.b.x0) * (p.b.y1 - p.b.y0);
+            if (best < 0 || area < best) { best = area; t = p.t; }
+        }
+        for (size_t i = 0; i < n; i++) if (!g_box3d[i]) g_tf[i] = t;
+        return;
+    }
     std::vector<int> par(n);
     for (size_t i = 0; i < n; i++) par[i] = (int)i;
     auto find = [&](int i) { while (par[i] != i) i = par[i] = par[par[i]]; return i; };
@@ -216,7 +240,10 @@ static void layout_2d(float k) {
         }
     }
     for (size_t i = 0; i < n; i++) g_tf[i] = g_box3d[i] ? Tf{0, 1} : gt[find((int)i)];
-    if (g_log_level >= 3 && (g_frame % 100) == 0)
+    g_placed.erase(std::remove_if(g_placed.begin(), g_placed.end(), [](const Placed& p) { return g_frame - p.frame > 4; }), g_placed.end());
+    for (size_t i = 0; i < n; i++)
+        if (find((int)i) == (int)i && !g_box3d[i] && gt[i].k != 1.0f && g_placed.size() < 600) g_placed.push_back(Placed{gb[i], gt[i], g_frame});
+    if (g_log_level >= 3 && (g_frame % 100) < 2)
         for (size_t i = 0; i < n; i++) if (find((int)i) == (int)i)
             logf("  2D group %d..%d x %d..%d -> anchor %.0f k %.2f (clip %d..%d)\n", gb[i].x0, gb[i].x1, gb[i].y0, gb[i].y1, gt[i].a, gt[i].k, L, R);
 }
@@ -361,7 +388,8 @@ static void draw_polygon() {
     {
         int x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
         for (int k = 1; k < n; k++) { x0 = std::min(x0, v[k].x); x1 = std::max(x1, v[k].x); y0 = std::min(y0, v[k].y); y1 = std::max(y1, v[k].y); }
-        if (prim_2d(x0, y0, x1, y1, pg_kind != 0)) return;
+        // in the world list only the front-most slots can hold a 2D panel; everything behind is the scene
+        if (prim_2d(x0, y0, x1, y1, pg_kind != 0 ? 1 : (g_list_3d && g_ot_index < g_ot_slots_cur - 8) ? 2 : 0)) return;
     }
     if (g_dbg_file) {
         fprintf(g_dbg_file, "poly %02x ot %d pgxp %d tp %d,%d semi %d:", cmd, g_ot_index, pg_kind, g_st.tpx, g_st.tpy, (int)g_st.semi);
@@ -665,6 +693,7 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
         if (g_dbg_frame == g_frame && !g_dbg_file) g_dbg_file = fopen("prims.txt", "w");
         int slots = walk_list(madr, false);
         g_list_3d = slots >= 1024;
+        g_ot_slots_cur = slots;
         g_sub_n = 0;
         // 2D layers: the HUD's own small table, or any list while no 3D is on screen (menus, loading)
         bool is2d = g_hud_fix && g_cfg.widescreen && g_ws_scale != 1.0f && slots > 0 &&
@@ -680,7 +709,7 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
             g_collect = false;
             // a big list during gameplay is 2D only when it holds no 3D at all (the game's second,
             // nearly empty list carries HUD text such as the scope's info line)
-            if (g_log_level >= 3 && (g_frame % 100) == 0) logf("  collect: %d boxes, 3d=%d in_game=%d clip %d..%d\n", (int)g_boxes.size(), (int)g_collect_3d, (int)in_game, g_clip_l, g_clip_r);
+            if (g_log_level >= 3 && (g_frame % 100) < 2) logf("  collect: %d boxes, 3d=%d in_game=%d clip %d..%d\n", (int)g_boxes.size(), (int)g_collect_3d, (int)in_game, g_clip_l, g_clip_r);
             g_world_layout = slots > 64 && in_game && g_collect_3d;
             g_sub_n = 0;
             layout_2d(g_ws_scale);
@@ -725,8 +754,9 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
         g_tf_on = false;
         g_st.xs_a = 0;
         g_st.xs_k = 1;
+        g_st.xs_clip = 0;
         g_ot_slots = slots;
-        if (g_log_level >= 3 && (g_frame % 100) == 0) logf("frame %d list @%06x: %d slots%s\n", g_frame, madr & 0x1FFFFF, slots, is2d ? " (2D)" : "");
+        if (g_log_level >= 3 && (g_frame % 100) < 2) logf("frame %d list @%06x: %d slots%s\n", g_frame, madr & 0x1FFFFF, slots, is2d ? " (2D)" : "");
         if (g_log_level >= 4) { extern float g_gte_h; logf("frame %d list @%06x: %d slots, H %.0f, off %d,%d clip %d..%d x %d..%d\n", g_frame, madr & 0x1FFFFF, slots, g_gte_h, g_off_x, g_off_y, g_st.cx1, g_st.cx2, g_st.cy1, g_st.cy2); }
         if (g_dbg_file && g_dbg_frame != g_frame) { fclose(g_dbg_file); g_dbg_file = nullptr; }
         return;
