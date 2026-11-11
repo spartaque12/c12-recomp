@@ -155,6 +155,28 @@ static void restore(uint32_t hero, int scope) {
 static int32_t saved_eye[3];
 static uint32_t saved_eye_vo;
 static int in_render;               /* inside the game's render function (8003836c) */
+/* The player's movement input (W/A/S/D or stick) as a world direction relative to the view, as a facing
+ * angle (4096 per turn), or -1 when not moving. */
+static int stick_a;   /* the same input as a stick angle (0 = up, 1024 = right) */
+static int input_world_a(void) {
+    int lx = 0, ly = 0;
+    uint32_t b = api->pad(&lx, &ly);
+    float mx = (float)lx, my = (float)-ly;
+    if (b & (1u << 4)) my += 127.0f;
+    if (b & (1u << 6)) my -= 127.0f;
+    if (b & (1u << 5)) mx += 127.0f;
+    if (b & (1u << 7)) mx -= 127.0f;
+    if (mx * mx + my * my <= 40.0f * 40.0f) { stick_a = -1; return -1; }
+    stick_a = (int)(atan2_4096(mx, my)) & 0xfff;
+    float dx = vm_f[0] * my + vm_r[0] * mx, dz = vm_f[2] * my + vm_r[2] * mx;
+    return (int)(atan2_4096(dx, dz)) & 0xfff;
+}
+
+static int cur_pad_dir = -1;
+static void set_pad_dir(int d) { if (d != cur_pad_dir) { api->game_option("pad_dir", d); cur_pad_dir = d; } }
+static int frame_pass;    /* set for the one apply() per game frame that runs before the frame is drawn */
+static int wall_c = -1;   /* the game's camera reference for the controls while climbing */
+
 static void apply(void) {
     uint32_t cam = g_cam;
     if (!is_ptr(cam)) return;
@@ -218,6 +240,8 @@ static void apply(void) {
         scope_entry_a = scope_last_a = -1;
     }
     if (!enabled || !is_ptr(hero) || !is_ptr(vo) || scope || cutscene) {
+        set_pad_dir(-1);
+        wall_c = -1;
         restore(hero, scope);
         if (enabled && scope && scope_fov && !cutscene) api->set_fov(fov);
         return;
@@ -272,6 +296,21 @@ static void apply(void) {
          * before the next camera update) the camera's yaw is turned to the movement direction - the
          * picture was already built from the real view above */
         cur_move_a = move_a;   /* applied again inside the game's steering (steer_hook) */
+    }
+    if (frame_pass) {
+        /* On a climbing wall the game reads the stick relative to a camera direction of its own (not
+         * the view; it is where third person shows the wall from) and climbs towards the result: into
+         * the wall = up, along it = sideways. It stores the resulting world direction at controller
+         * +0x74, so the reference is that minus the stick angle it saw; the stick is then turned so
+         * W/A/S/D act relative to the view (W into the wall = up). */
+        uint32_t ctl = (uint32_t)r32(hero + 0xb0);
+        int w = input_world_a(), pd = -1;
+        if (is_ptr(ctl) && (r32(ctl + 0x10) & 0x04000000u)) {
+            int seen = cur_pad_dir >= 0 ? cur_pad_dir : stick_a;
+            if (seen >= 0) wall_c = (r16(ctl + 0x74) - seen) & 0xfff;
+            if (w >= 0 && wall_c >= 0) pd = (w - wall_c) & 0xfff;
+        } else wall_c = -1;
+        set_pad_dir(pd);
     }
     /* The facing itself is only set inside the game's on-foot steering (steer_hook): while the
      * game runs anything else for the hero - climbing a ladder, vaulting, cutscene moves - the mod
@@ -373,7 +412,9 @@ static void draw_hook(uint32_t* r, C12OrigFn orig) {
 static void render_hook(uint32_t* r, C12OrigFn orig) {
     saved_eye_vo = 0;
     in_render = 1;
+    frame_pass = 1;
     apply();
+    frame_pass = 0;
     orig(r);
     in_render = 0;
     if (saved_eye_vo) {
@@ -412,12 +453,20 @@ static void sfx_hook(uint32_t* r, C12OrigFn orig) {
     orig(r);
 }
 
+/* The hero's action flags (*(hero+0xb0)+0x10): only low bits while standing or running; climbing a
+ * wall or ladder (0x04000000), vaulting onto something (0x00400000) and pushing a crate (0x10000000) set
+ * high ones. In those the game steers him itself (relative to the wall or crate), so the mod keeps out. */
+static int on_foot(uint32_t hero) {
+    uint32_t c = (uint32_t)r32(hero + 0xb0);
+    return !is_ptr(c) || (r32(c + 0x10) & 0xffff0000u) == 0;
+}
+
 /* 8001dea0 steers the current object (800efdc8) towards the target angle at *(obj+0x9c)+0x1a. For
  * the hero, while CS-style movement is on and he is moving, target and facing are the wanted
  * direction right before it runs, so he runs exactly that way (with the game's own collision). */
 static void steer_hook(uint32_t* r, C12OrigFn orig) {
     uint32_t hero = (uint32_t)r32(0x800efdb8);
-    if (was_on && is_ptr(hero) && (uint32_t)r32(0x800efdc8) == hero) {
+    if (was_on && is_ptr(hero) && (uint32_t)r32(0x800efdc8) == hero && on_foot(hero)) {
         int a = (cs_move && cur_move_a >= 0) ? cur_move_a : cur_face_a;
         if (a >= 0) {
             uint32_t tg = (uint32_t)r32(hero + 0x9c);
@@ -437,9 +486,28 @@ static void steer_hook(uint32_t* r, C12OrigFn orig) {
 static void move_prep_hook(uint32_t* r, C12OrigFn orig) {
     uint32_t hero = (uint32_t)r32(0x800efdb8);
     if (was_on && is_ptr(hero) && r[4] == hero) {
-        int a = (cs_move && cur_move_a >= 0) ? cur_move_a : cur_face_a;
         uint32_t tg = (uint32_t)r32(hero + 0x9c);
-        if (a >= 0 && is_ptr(tg)) { w16(tg + 0x1a, a); w32(tg + 0x48, (r32(tg + 0x48) & ~0xfff) | a); }
+        if (on_foot(hero)) {
+            int a = (cs_move && cur_move_a >= 0) ? cur_move_a : cur_face_a;
+            if (a >= 0 && is_ptr(tg)) { w16(tg + 0x1a, a); w32(tg + 0x48, (r32(tg + 0x48) & ~0xfff) | a); }
+        }
+    }
+    orig(r);
+}
+
+/* 80022154(obj, ...) starts and stops running. Starting from a standstill it compares the direction
+ * it read from the controls (800eff04, relative to its own camera) with the hero's facing and, if they
+ * are more than 22.5 degrees apart, turns him on the spot first. The mod keeps the facing at the
+ * wanted direction itself, so that turn would never finish (on stretches where the game's camera does
+ * not look along the view he stood still): the game's reading is set to the same direction. */
+static void run_hook(uint32_t* r, C12OrigFn orig) {
+    uint32_t hero = (uint32_t)r32(0x800efdb8);
+    if (was_on && is_ptr(hero) && r[4] == hero && on_foot(hero)) {
+        int a = (cs_move && cur_move_a >= 0) ? cur_move_a : cur_face_a;
+        if (a >= 0) {
+            set_facing(hero, a);
+            w32(0x800eff04, (r32(0x800eff04) & ~0xfffu) | a);
+        }
     }
     orig(r);
 }
@@ -481,5 +549,5 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("vm_yaw", "Weapon: turn (degrees)", &vm_yaw, -180.0f, 180.0f);
     api->setting_float("vm_pitch", "Weapon: tilt (degrees)", &vm_pitch, -90.0f, 90.0f);
     api->hook(0x8005f380, sfx_hook);
-    return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook) && api->hook(0x8002c048, physics_hook) && api->hook(0x8003836c, render_hook) && api->hook(0x8002bb90, move_prep_hook);
+    return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook) && api->hook(0x8002c048, physics_hook) && api->hook(0x8003836c, render_hook) && api->hook(0x8002bb90, move_prep_hook) && api->hook(0x80022154, run_hook);
 }

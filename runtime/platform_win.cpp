@@ -17,6 +17,7 @@ static u8 g_pad_axes[2][4] = {{128, 128, 128, 128}, {128, 128, 128, 128}};
 static u16 g_user_buttons;
 static u8 g_user_axes[4] = {128, 128, 128, 128};
 int g_pad_forward;   // set by mods (game_option "pad_forward")
+int g_pad_dir = -1;  // set by mods (game_option "pad_dir"): movement input replaced by a full stick at this angle
 extern u8 g_pad_motor[2][2];
 bool g_window_resized;
 
@@ -272,6 +273,15 @@ void plat_input_poll() {
     } else if (g_pad_forward == 2) {   // a mod moves the hero itself: the game sees no movement input
         down &= ~0xF0u;
         ax[2] = ax[3] = 128;
+    } else if (g_pad_dir >= 0) {   // a mod turns the movement input: the game sees the stick at g_pad_dir (0 = up, 1024 = right)
+        double a = (g_pad_dir & 0xfff) * (6.283185307179586 / 4096.0), sx = sin(a), cy = cos(a);
+        down &= ~0xF0u;
+        if (cy > 0.38) down |= 1u << 4;
+        if (cy < -0.38) down |= 1u << 6;
+        if (sx > 0.38) down |= 1u << 5;
+        if (sx < -0.38) down |= 1u << 7;
+        ax[2] = (u8)lround(128.0 + sx * 127.0);
+        ax[3] = (u8)lround(128.0 - cy * 127.0);
     }
     g_pad_state[0] = (u16)~down;
     memcpy(g_pad_axes[0], ax, 4);
