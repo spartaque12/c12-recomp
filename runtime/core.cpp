@@ -329,6 +329,8 @@ struct ActiveOverlay {
     std::vector<RecompFn> tab;   // by word offset
 };
 static std::vector<ActiveOverlay> g_active;
+// name of the most recently bound level overlay (the current level), "" if none
+const char* overlay_current_name() { return g_active.empty() ? "" : g_active.back().d->name; }
 int g_overlays_native = 1;
 
 // Called with the image base and its relocation table just before the game relocates it.

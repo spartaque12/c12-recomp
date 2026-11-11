@@ -201,7 +201,56 @@ void idle_until_event(Ctx* c) {
     if (c->cyc < c->evt) c->cyc = c->evt;
     psx_events(c);
 }
+// ---- position bookmarks (testing aid; real save states are not possible: game objects run as native
+// coroutines whose progress lives on host stacks) -----------------------------------------------------
+// F6 appends the hero's level, position and facing to bookmarks.txt. --goto FRAME places the hero at
+// the last bookmark at that frame (same level only). The hero object is at 800efdb8: world MATRIX at
+// +0x14 (position s32 at +0x28), physics body at *(hero+0x9c) (position 20.12 fixed at +8/+0xc/+0x10,
+// s16 copy at +0x20), 16-bit position copies at +0x3c/+0x40/+0x44/+0x48, facing copies as below.
+const char* overlay_current_name();
+void ui_notify(const char* text);
+int g_bookmark_frame = -1;   // test runs: --bookmark FRAME saves a bookmark at that frame
+int g_bookmark_request;
+int g_goto_frame = -1;
+static const int k_face_hero[] = {0x116, 0x118, 0x11e, 0x120, 0x126, 0x128, 0x12e, 0x130, 0x154};
+static const int k_face_ctl[] = {0x50, 0x5c, 0x68, 0x74, 0xa8};
+static void bookmark_save(Ctx* c) {
+    u32 hero = mem_r32(c, 0x800efdb8);
+    if ((hero >> 24) != 0x80) { ui_notify("no hero to bookmark"); return; }
+    int x = (s32)mem_r32(c, hero + 0x28), y = (s32)mem_r32(c, hero + 0x2c), z = (s32)mem_r32(c, hero + 0x30);
+    int a = mem_r16(c, hero + 0x118) & 0xfff;
+    FILE* f = fopen("bookmarks.txt", "a");
+    if (f) { fprintf(f, "%s %d %d %d %d\n", overlay_current_name(), x, y, z, a); fclose(f); }
+    logf("bookmark: %s %d %d %d %d\n", overlay_current_name(), x, y, z, a);
+    ui_notify("position bookmarked (bookmarks.txt)");
+}
+static void bookmark_goto(Ctx* c) {
+    char lvl[64] = "", line[256];
+    int x = 0, y = 0, z = 0, a = 0, ok = 0;
+    FILE* f = fopen("bookmarks.txt", "r");
+    if (f) { while (fgets(line, sizeof line, f)) if (sscanf(line, "%63s %d %d %d %d", lvl, &x, &y, &z, &a) == 5) ok = 1; fclose(f); }
+    u32 hero = mem_r32(c, 0x800efdb8);
+    if (!ok || (hero >> 24) != 0x80) { logf("goto: no bookmark or no hero\n"); return; }
+    if (strcmp(lvl, overlay_current_name())) logf("goto: bookmark is in level %s, current level is %s\n", lvl, overlay_current_name());
+    const int p[3] = {x, y, z};
+    u32 body = mem_r32(c, hero + 0x9c);
+    for (int i = 0; i < 3; i++) {
+        mem_w32(c, hero + 0x28 + i * 4, (u32)p[i]);
+        if ((body >> 24) == 0x80) { mem_w32(c, body + 8 + i * 4, (u32)(p[i] << 12)); mem_w16(c, body + 0x20 + i * 2, (u32)(u16)(s16)p[i]); }
+    }
+    mem_w16(c, hero + 0x3c, (u32)(u16)(s16)x); mem_w16(c, hero + 0x44, (u32)(u16)(s16)x);
+    mem_w16(c, hero + 0x40, (u32)(u16)(s16)z); mem_w16(c, hero + 0x48, (u32)(u16)(s16)z);
+    for (int o : k_face_hero) mem_w16(c, hero + o, (u32)a);
+    u32 ctl = mem_r32(c, hero + 0xb0);
+    if ((ctl >> 24) == 0x80) for (int o : k_face_ctl) mem_w16(c, ctl + o, (u32)a);
+    if ((body >> 24) == 0x80) mem_w16(c, body + 0x1a, (u32)a);
+    logf("goto: hero placed at %s %d %d %d facing %d (frame %d)\n", lvl, x, y, z, a, g_frame);
+}
+
 static void hook_vsync_wait(Ctx* c, RecompFn) {
+    if (g_bookmark_frame >= 0 && g_frame >= g_bookmark_frame) { g_bookmark_frame = -1; g_bookmark_request = 1; }
+    if (g_bookmark_request) { g_bookmark_request = 0; bookmark_save(c); }
+    if (g_goto_frame >= 0 && g_frame >= g_goto_frame) { g_goto_frame = -1; bookmark_goto(c); }
     s32 target = (s32)c->r[4];
     int guard = 0;
     while ((s32)rd(G_VCOUNT) < target) {

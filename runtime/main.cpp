@@ -39,6 +39,8 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k == "ws_flags") { extern int g_ws_flags; g_ws_flags = atoi(v.c_str()); }
     else if (k == "aim_fix") { extern int g_aim_fix; g_aim_fix = atoi(v.c_str()); }
     else if (k == "store_watch") { extern u32 g_store_watch; g_store_watch = strtoul(v.c_str(), nullptr, 16) & 0x1FFFFF; }
+    else if (k == "bookmark") { extern int g_bookmark_frame; g_bookmark_frame = atoi(v.c_str()); }
+    else if (k == "goto") { extern int g_goto_frame; g_goto_frame = atoi(v.c_str()); }
     else if (k == "trace_fn") { extern u32 g_trace_fn; g_trace_fn = strtoul(v.c_str(), nullptr, 16); }
     else if (k == "dbg_skip") { extern int g_dbg_skip; g_dbg_skip = atoi(v.c_str()); }
     else if (k == "cam_log") { extern int g_cam_log; g_cam_log = atoi(v.c_str()); }

@@ -22,7 +22,7 @@ Optional: put a DuckStation-style HD texture pack into the `hd_textures` folder.
     .\build.ps1 -NoRecomp         # rebuild the runtime only
 
 Hotkeys: **Tab** = switch classic / remastered presentation, **F1** or **Esc** = settings menu (all options live,
-rebindable keys, save to `c12.ini`), **`** (hold) = fast-forward, **Alt+Enter** / **F11** = fullscreen.
+rebindable keys, save to `c12.ini`), **`** (hold) = fast-forward, **Alt+Enter** / **F11** = fullscreen, **F6** = save a position bookmark (bookmarks.txt; tests can return to it with `--goto FRAME`, same level only - real save states are not possible in this port).
 
 Default keyboard + mouse (rebind in the menu, Controls tab): WASD or arrows = move, mouse = camera (right stick),
 left click or Space = attack / accept (Cross), right click = first-person view (R2), Left Shift or middle click =
