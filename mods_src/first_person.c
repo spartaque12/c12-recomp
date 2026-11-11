@@ -109,7 +109,14 @@ static float fsin(float deg) {
     return x * (1.0f - x2 / 6.0f * (1.0f - x2 / 20.0f * (1.0f - x2 / 42.0f)));
 }
 static float fcos(float deg) { return fsin(deg + 90.0f); }
-static float fsqrt1(float v) { float x = v > 1.0f ? v : 1.0f; for (int i = 0; i < 10; i++) x = 0.5f * (x + v / x); return x; }
+static float fsqrt1(float v) {   /* square root without the math library: exponent-halving guess + Newton */
+    if (v <= 0.0f) return 0.0f;
+    union { float f; uint32_t u; } g = {v};
+    g.u = (g.u >> 1) + 0x1fc00000u;
+    float x = g.f;
+    for (int i = 0; i < 4; i++) x = 0.5f * (x + v / x);
+    return x;
+}
 
 /* The hero's facing angle is kept in several copies in the hero object and in his controller
  * (hero+0xb0), and his matrix is a turn about the vertical axis by it. */
@@ -370,6 +377,22 @@ static void render_hook(uint32_t* r, C12OrigFn orig) {
     orig(r);
     in_render = 0;
     if (saved_eye_vo) {
+        /* The game turns the player's input into a direction from where its camera stands relative to
+         * the hero. Its own camera lags behind turns and is pushed aside by walls, so it is put
+         * straight behind the hero along the view instead, at the game camera's own distance. */
+        uint32_t hero = (uint32_t)r32(0x800efdb8);
+        if (is_ptr(hero) && vm_ok) {
+            float hx = (float)r32(hero + 0x28), hz = (float)r32(hero + 0x30);
+            float dx = hx - (float)saved_eye[0], dz = hz - (float)saved_eye[2];
+            float dist = fsqrt1(dx * dx + dz * dz);
+            if (dist < 300.0f) dist = 300.0f;
+            if (dist > 1500.0f) dist = 1500.0f;   /* e.g. right after a teleport */
+            float fl = fsqrt1(vm_f[0] * vm_f[0] + vm_f[2] * vm_f[2]);
+            if (fl > 0.1f) {
+                saved_eye[0] = (int32_t)(hx - vm_f[0] / fl * dist);
+                saved_eye[2] = (int32_t)(hz - vm_f[2] / fl * dist);
+            }
+        }
         for (int i = 0; i < 3; i++) w32(saved_eye_vo + 0x20 + i * 4, saved_eye[i]);
         saved_eye_vo = 0;
     }
@@ -398,9 +421,25 @@ static void steer_hook(uint32_t* r, C12OrigFn orig) {
         int a = (cs_move && cur_move_a >= 0) ? cur_move_a : cur_face_a;
         if (a >= 0) {
             uint32_t tg = (uint32_t)r32(hero + 0x9c);
-            if (is_ptr(tg)) w16(tg + 0x1a, a);   /* the steering's target, so it does not turn him back */
+            /* the physics body: current yaw at +0x1a and the yaw it turns towards at +0x48 (low 12 bits;
+             * the game sets that one from its own camera-relative reading of the controls) */
+            if (is_ptr(tg)) { w16(tg + 0x1a, a); w32(tg + 0x48, (r32(tg + 0x48) & ~0xfff) | a); }
             set_facing(hero, a);
         }
+    }
+    orig(r);
+}
+
+/* 8002bb90(obj, dir, speed) prepares an object's movement: it turns the physics body's yaw (+0x1a)
+ * towards the wanted yaw (+0x48, which the game sets from its camera-relative reading of the controls
+ * using its own camera position - that lags and is pushed aside by walls) and gives the direction to
+ * the physics step. For the hero both yaws are the wanted direction right before it runs. */
+static void move_prep_hook(uint32_t* r, C12OrigFn orig) {
+    uint32_t hero = (uint32_t)r32(0x800efdb8);
+    if (was_on && is_ptr(hero) && r[4] == hero) {
+        int a = (cs_move && cur_move_a >= 0) ? cur_move_a : cur_face_a;
+        uint32_t tg = (uint32_t)r32(hero + 0x9c);
+        if (a >= 0 && is_ptr(tg)) { w16(tg + 0x1a, a); w32(tg + 0x48, (r32(tg + 0x48) & ~0xfff) | a); }
     }
     orig(r);
 }
@@ -442,5 +481,5 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("vm_yaw", "Weapon: turn (degrees)", &vm_yaw, -180.0f, 180.0f);
     api->setting_float("vm_pitch", "Weapon: tilt (degrees)", &vm_pitch, -90.0f, 90.0f);
     api->hook(0x8005f380, sfx_hook);
-    return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook) && api->hook(0x8002c048, physics_hook) && api->hook(0x8003836c, render_hook);
+    return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook) && api->hook(0x8002c048, physics_hook) && api->hook(0x8003836c, render_hook) && api->hook(0x8002bb90, move_prep_hook);
 }
