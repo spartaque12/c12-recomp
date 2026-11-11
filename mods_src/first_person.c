@@ -36,7 +36,17 @@ static float fov = 1.25f;          /* field-of-view multiplier while the mod is 
 static float eye_up = 300.0f;      /* eye height above the feet, game units (the hero is ~330 tall) */
 static float eye_fwd = 0.0f;
 static int hide_body = 1;
-static int face_view = 1;          /* the hero always faces where you look (shots go to the crosshair) */
+static int direct_look = 1;        /* mouse turns the view directly, no camera easing */
+static float look_yaw, look_pitch;
+static int look_valid, saved_ac2 = -1;
+static int face_view = 1;          /* the hero faces where you look when standing still */
+static int cs_move = 1;           /* move relative to the view at once: backpedal and strafe (CS-style) */
+static int scope_fov = 1;          /* keep the same field of view in the scope view (R2) */
+static int last_view_a = -1;
+static int cur_move_a = -1;        /* wanted movement direction this frame, -1 = standing */
+static int in_scope, scope_frames, scope_entry_a = -1, scope_last_a = -1;
+static float look_sign = 1.0f;     /* +1 if the view's facing angle grows with the look yaw */
+static float look_turn;           /* view turn owed to the direct look (in facing units) */
 
 /* atan2 in game angle units (4096 per turn), no math library */
 static float atan2_4096(float y, float x) {
@@ -55,9 +65,6 @@ static int viewmodel = 1;          /* draw the weapon at a fixed place in front 
 static float vm_right = 60.0f, vm_down = 70.0f, vm_fwd = 170.0f;
 static float vm_yaw = 0.0f, vm_pitch = 0.0f;   /* degrees */
 
-static int direct_look = 1;        /* mouse turns the view directly, no camera easing */
-static float look_yaw, look_pitch;
-static int look_valid, saved_ac2 = -1;
 static int was_on;                 /* the mod changed the game's state last frame */
 static int saved_autocenter = -1;
 static uint32_t g_cam;             /* the camera the game updated this frame */
@@ -96,11 +103,30 @@ static float fsin(float deg) {
 }
 static float fcos(float deg) { return fsin(deg + 90.0f); }
 
+/* The hero's facing angle is kept in several copies in the hero object and in his controller
+ * (hero+0xb0), and his matrix is a turn about the vertical axis by it. */
+static void set_facing(uint32_t hero, int a) {
+    static const int hero_offs[] = {0x116, 0x118, 0x11e, 0x120, 0x126, 0x128, 0x12e, 0x130, 0x154};
+    for (int i = 0; i < (int)(sizeof hero_offs / sizeof hero_offs[0]); i++) w16(hero + hero_offs[i], a);
+    uint32_t ctl = (uint32_t)r32(hero + 0xb0);
+    if (is_ptr(ctl)) {
+        static const int ctl_offs[] = {0x50, 0x5c, 0x68, 0x74, 0xa8};
+        for (int i = 0; i < (int)(sizeof ctl_offs / sizeof ctl_offs[0]); i++) w16(ctl + ctl_offs[i], a);
+    }
+    float c = fcos(a * (360.0f / 4096.0f)), s = fsin(a * (360.0f / 4096.0f));
+    w16(hero + 0x14 + 0, (int)(c * 4096.0f));    /* m00 */
+    w16(hero + 0x14 + 4, (int)(s * 4096.0f));    /* m02 */
+    w16(hero + 0x14 + 12, (int)(-s * 4096.0f));  /* m20 */
+    w16(hero + 0x14 + 16, (int)(c * 4096.0f));   /* m22 */
+}
+
 static void restore(uint32_t hero, int scope) {
     if (!was_on) return;
     if (is_ptr(hero) && !scope) set_hidden(hero, 0);
     api->set_fov(1.0f);
     api->game_option("aim_to_view", 0);
+    api->game_option("pad_forward", 0);
+    cur_move_a = -1;
     if (saved_autocenter >= 0) { api->game_option("cam_autocenter", saved_autocenter); saved_autocenter = -1; }
     was_on = 0;
     vm_ok = 0;
@@ -117,7 +143,31 @@ static void apply(void) {
     /* The view object records the camera that drives it (+4). In cutscenes another camera does:
      * then the mod steps aside and the cutscene plays as made. */
     int cutscene = is_ptr(vo) && (uint32_t)r32(vo + 4) != cam;
-    if (!enabled || !is_ptr(hero) || !is_ptr(vo) || scope || cutscene) { restore(hero, scope); return; }
+    if (enabled && scope && !cutscene) {
+        if (!in_scope) {
+            /* entering the scope: it looks where the first-person view looked (its yaw at 800f0ca8 uses
+             * the hero's facing units) */
+            in_scope = 1;
+            scope_frames = 0;
+            if (last_view_a >= 0) scope_entry_a = last_view_a;
+        }
+        if (scope_frames < 3 && scope_entry_a >= 0) { w16(0x800f0ca8, scope_entry_a); scope_frames++; }
+        scope_last_a = r16(0x800f0ca8) & 0xfff;
+    }
+    if (!scope && in_scope) {
+        /* leaving the scope: carry on looking where the scope looked */
+        in_scope = 0;
+        if (scope_entry_a >= 0 && scope_last_a >= 0) {
+            int d = ((scope_last_a - scope_entry_a + 2048) & 0xfff) - 2048;
+            look_turn += (float)d;
+        }
+        scope_entry_a = scope_last_a = -1;
+    }
+    if (!enabled || !is_ptr(hero) || !is_ptr(vo) || scope || cutscene) {
+        restore(hero, scope);
+        if (enabled && scope && scope_fov && !cutscene) api->set_fov(fov);
+        return;
+    }
     if (!was_on) saved_autocenter = -1;
     was_on = 1;
     if (!direct_look) {   /* without direct look, strafing relies on the runtime's "hold direction" option */
@@ -133,23 +183,35 @@ static void apply(void) {
     vm_eye[1] -= eye_up;
     for (int i = 0; i < 3; i++) w32(vo + 0x20 + i * 4, (int)vm_eye[i]);
     set_hidden(hero, hide_body);
-    if (face_view) {
-        /* Turn the hero to where the view looks, so he shoots at the crosshair. His facing is an angle
-         * (4096 per turn, forward = (sin a, 0, cos a)) kept in several copies in the hero object and
-         * in his controller (hero+0xb0), and his matrix is a turn about the vertical axis by it. */
-        int a = (int)(atan2_4096(vm_f[0], vm_f[2])) & 0xfff;
-        static const int hero_offs[] = {0x116, 0x118, 0x11e, 0x120, 0x126, 0x128, 0x12e, 0x130, 0x154};
-        for (int i = 0; i < (int)(sizeof hero_offs / sizeof hero_offs[0]); i++) w16(hero + hero_offs[i], a);
-        uint32_t ctl = (uint32_t)r32(hero + 0xb0);
-        if (is_ptr(ctl)) {
-            static const int ctl_offs[] = {0x50, 0x5c, 0x68, 0x74, 0xa8};
-            for (int i = 0; i < (int)(sizeof ctl_offs / sizeof ctl_offs[0]); i++) w16(ctl + ctl_offs[i], a);
+    /* view direction as a facing angle (4096 per turn, forward = (sin a, 0, cos a)) */
+    int view_a = (int)(atan2_4096(vm_f[0], vm_f[2])) & 0xfff;
+    last_view_a = view_a;
+    int move_a = -1;
+    if (cs_move) {
+        /* CS-style movement: the game's controls are relative to the camera and the hero runs where he
+         * faces, so he is pointed at the wanted direction (view-relative W/S/A/D or stick) at once, and
+         * the game moves him there with its own collision. Shots are traced from the eye anyway. */
+        int lx = 0, ly = 0;
+        uint32_t b = api->pad(&lx, &ly);
+        float mx = (float)lx, my = (float)-ly;
+        if (b & (1u << 4)) my += 127.0f;
+        if (b & (1u << 6)) my -= 127.0f;
+        if (b & (1u << 5)) mx += 127.0f;
+        if (b & (1u << 7)) mx -= 127.0f;
+        if (mx * mx + my * my > 40.0f * 40.0f) {
+            float dx = vm_f[0] * my + vm_r[0] * mx, dz = vm_f[2] * my + vm_r[2] * mx;
+            move_a = (int)(atan2_4096(dx, dz)) & 0xfff;
         }
-        float c = fcos(a * (360.0f / 4096.0f)), s = fsin(a * (360.0f / 4096.0f));
-        w16(hero + 0x14 + 0, (int)(c * 4096.0f));    /* m00 */
-        w16(hero + 0x14 + 4, (int)(s * 4096.0f));    /* m02 */
-        w16(hero + 0x14 + 12, (int)(-s * 4096.0f));  /* m20 */
-        w16(hero + 0x14 + 16, (int)(c * 4096.0f));   /* m22 */
+        /* the game runs straight "forward" relative to its camera; for the hero's update (which comes
+         * before the next camera update) the camera's yaw is turned to the movement direction - the
+         * picture was already built from the real view above */
+        cur_move_a = move_a;   /* applied again inside the game's steering (steer_hook) */
+    }
+    if (face_view || move_a >= 0) {
+        /* The hero's facing is kept in several copies in the hero object and in his controller
+         * (hero+0xb0), and his matrix is a turn about the vertical axis by it. */
+        int a = move_a >= 0 ? move_a : view_a;
+        set_facing(hero, a);
     }
     api->set_fov(fov);
     api->game_option("aim_to_view", 1);   /* shots go to the centre of the screen */
@@ -202,7 +264,8 @@ static void camera_hook(uint32_t* r, C12OrigFn orig) {
         }
         float dy = 0, dp = 0;
         api->mouse_look(&dy, &dp);
-        look_yaw += dy;
+        look_yaw += dy + look_turn * look_sign;
+        look_turn = 0;
         look_pitch -= dp;
         w16(cam + 0x20, (int)look_pitch & 0xfff);
         w16(cam + 0x22, (int)look_yaw & 0xfff);
@@ -251,6 +314,19 @@ static void sfx_hook(uint32_t* r, C12OrigFn orig) {
     orig(r);
 }
 
+/* 8001dea0 steers the current object (800efdc8) towards the target angle at *(obj+0x9c)+0x1a. For
+ * the hero, while CS-style movement is on and he is moving, target and facing are the wanted
+ * direction right before it runs, so he runs exactly that way (with the game's own collision). */
+static void steer_hook(uint32_t* r, C12OrigFn orig) {
+    uint32_t hero = (uint32_t)r32(0x800efdb8);
+    if (was_on && cs_move && cur_move_a >= 0 && is_ptr(hero) && (uint32_t)r32(0x800efdc8) == hero) {
+        uint32_t tg = (uint32_t)r32(hero + 0x9c);
+        if (is_ptr(tg)) w16(tg + 0x1a, cur_move_a);
+        set_facing(hero, cur_move_a);
+    }
+    orig(r);
+}
+
 __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     if (a->version < 2) return 0;
     api = a;
@@ -260,6 +336,8 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("eye_fwd", "Eye forward / back", &eye_fwd, -150.0f, 150.0f);
     api->setting_bool("direct_look", "Direct mouse look (no camera easing)", &direct_look);
     api->setting_bool("strafe", "Keep looking where you aim while moving (strafe)", &strafe);
+    api->setting_bool("cs_move", "CS-style movement (backpedal and strafe relative to the view)", &cs_move);
+    api->setting_bool("scope_fov", "Same field of view in the scope (R2)", &scope_fov);
     api->setting_bool("face_view", "Hero faces where you look (shots go to the crosshair)", &face_view);
     api->setting_bool("hide_body", "Hide the hero's body", &hide_body);
     api->setting_bool("clean_scope", "Scope view (R2) without scan lines, tint and hum", &clean_scope);
@@ -270,5 +348,5 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("vm_yaw", "Weapon: turn (degrees)", &vm_yaw, -180.0f, 180.0f);
     api->setting_float("vm_pitch", "Weapon: tilt (degrees)", &vm_pitch, -90.0f, 90.0f);
     api->hook(0x8005f380, sfx_hook);
-    return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook);
+    return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook);
 }

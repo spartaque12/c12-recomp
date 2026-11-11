@@ -51,13 +51,17 @@ typedef struct C12ModApi {
     /* Change one of the runtime's own options for as long as the mod needs it; returns the previous
      * value (-1 = unknown key) so the mod can put it back. Keys: "cam_autocenter" (0/1),
      * "mouse_direct_cam" (0/1), "interp" (0/1), "scope_overlay" (0 = draw the game's scope view
-     * without its scan lines and green tint), "aim_to_view" (1 = shots go to the screen centre). */
+     * without its scan lines and green tint), "pad_forward" (1 = the game sees only "run straight forward" as movement input), "aim_to_view" (1 = shots go to the screen centre). */
     int (*game_option)(const char* key, int value);
     /* Take the mouse movement collected since the last call, already scaled by the user's
      * sensitivity and invert settings into game angle units (4096 = full turn): yaw > 0 = right,
      * pitch > 0 = down. The runtime's own camera mouse-look then sees no movement. (Movement is only
      * collected outside the scope view and while "raw mouse camera" is on.) */
     void (*mouse_look)(float* yaw, float* pitch);
+    /* Controller 1 as the player is pressing it (before "pad_forward"): PSX button bits, 1 = pressed (bit 4 up, 5 right,
+     * 6 down, 7 left, 8 L2, 9 R2, 10 L1, 11 R1, 12 triangle, 13 circle, 14 cross, 15 square), and the
+     * left stick (-128..127, x right, y down). Keyboard and mouse bindings are included. */
+    uint32_t (*pad)(int* lx, int* ly);
 } C12ModApi;
 
 #ifdef __cplusplus

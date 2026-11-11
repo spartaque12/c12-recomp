@@ -14,6 +14,9 @@ static LARGE_INTEGER g_qpf, g_qpc0;
 static bool g_turbo;
 static u16 g_pad_state[2] = {0xFFFF, 0xFFFF};
 static u8 g_pad_axes[2][4] = {{128, 128, 128, 128}, {128, 128, 128, 128}};
+static u16 g_user_buttons;
+static u8 g_user_axes[4] = {128, 128, 128, 128};
+int g_pad_forward;   // set by mods (game_option "pad_forward")
 extern u8 g_pad_motor[2][2];
 bool g_window_resized;
 
@@ -261,11 +264,20 @@ void plat_input_poll() {
             }
         }
     } else if (!(down & (1u << 9))) g_aim_mx = g_aim_my = 0;
+    g_user_buttons = down;
+    memcpy(g_user_axes, ax, 4);
+    if (g_pad_forward) {   // a mod steers the movement itself: the game sees "run straight forward"
+        down = (down & ~0xF0u) | (1u << 4);
+        ax[2] = ax[3] = 128;
+    }
     g_pad_state[0] = (u16)~down;
     memcpy(g_pad_axes[0], ax, 4);
 }
 
 u16 pad_buttons(int port) { return g_pad_state[port & 1]; }
+// the player's own input before any mod override (buttons active-high, axes RX RY LX LY)
+u16 pad_user_buttons() { return g_user_buttons; }
+void pad_user_analog(u8 out[4]) { memcpy(out, g_user_axes, 4); }
 void pad_analog(int port, u8 out[4]) { memcpy(out, g_pad_axes[port & 1], 4); }
 
 // ---- audio -----------------------------------------------------------------
