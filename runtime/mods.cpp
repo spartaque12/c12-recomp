@@ -58,6 +58,8 @@ extern int g_laser_beam;
 extern long g_cam_mx, g_cam_my;
 u16 pad_user_buttons();
 void pad_user_analog(u8 out[4]);
+extern int g_aim_origin_set, g_aim_origin[3];
+static void api_set_aim_origin(int set, int x, int y, int z) { g_aim_origin_set = set; g_aim_origin[0] = x; g_aim_origin[1] = y; g_aim_origin[2] = z; }
 static uint32_t api_pad(int* lx, int* ly) {
     u8 ax[4];
     pad_user_analog(ax);
@@ -163,6 +165,7 @@ void mods_init() {
     api.game_option = api_game_option;
     api.mouse_look = api_mouse_look;
     api.pad = api_pad;
+    api.set_aim_origin = api_set_aim_origin;
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA((dir + "\\*.dll").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;

@@ -62,6 +62,8 @@ typedef struct C12ModApi {
      * 6 down, 7 left, 8 L2, 9 R2, 10 L1, 11 R1, 12 triangle, 13 circle, 14 cross, 15 square), and the
      * left stick (-128..127, x right, y down). Keyboard and mouse bindings are included. */
     uint32_t (*pad)(int* lx, int* ly);
+    /* With "aim_to_view": where shots start (the mod's eye), set = 0 to use the view object's eye. */
+    void (*set_aim_origin)(int set, int x, int y, int z);
 } C12ModApi;
 
 #ifdef __cplusplus

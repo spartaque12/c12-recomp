@@ -373,13 +373,15 @@ static void hook_cam_stick(Ctx* c, RecompFn orig) {
 // components; eye s32 at +0x20) placed so that the muzzle sits on the eye: the trace then runs exactly
 // through the centre of the screen.
 int g_aim_fix = 1;   // debug switch (aim_fix=0 disables)
+
 int g_aim_to_view;   // set by mods while their own first-person view is active
+int g_aim_origin_set, g_aim_origin[3];   // where those shots start (the mod's eye), if set
 static void log_shot(Ctx* c, u32 obj, const char* tag) {
     if (g_log_level < 3) return;
     u32 st = mem_r32(c, obj + 0xbc);
     if ((st >> 24) != 0x80) return;
     double e[3], f[3], p[3], d = 0, t = 0;
-    for (int i = 0; i < 3; i++) { e[i] = (s32)mem_r32(c, 0x800f0110 + 0x20 + i * 4); f[i] = (s16)mem_r16(c, 0x800f0110 + 0x0c + i * 6 + 4) / 4096.0; p[i] = (s16)mem_r16(c, st + 0x38 + i * 2); t += (p[i] - e[i]) * f[i]; }
+    for (int i = 0; i < 3; i++) { e[i] = (g_aim_to_view && g_aim_origin_set) ? g_aim_origin[i] : (s32)mem_r32(c, 0x800f0110 + 0x20 + i * 4); f[i] = (s16)mem_r16(c, 0x800f0110 + 0x0c + i * 6 + 4) / 4096.0; p[i] = (s16)mem_r16(c, st + 0x38 + i * 2); t += (p[i] - e[i]) * f[i]; }
     for (int i = 0; i < 3; i++) { double q = p[i] - (e[i] + f[i] * t); d += q * q; }
     logf("shot %s frame %d: end %.0f,%.0f,%.0f  %.0f along the view, %.1f off the centre line\n", tag, g_frame, p[0], p[1], p[2], t, sqrt(d));
 }
@@ -397,16 +399,39 @@ static void hook_fire(Ctx* c, RecompFn orig) {
     for (int i = 0; i < 9; i++) { m[i] = (s16)mem_r16(c, vo + 0x0c + i * 2) / 4096.0; mem_w16(c, obj + 0x14 + i * 2, mem_r16(c, vo + 0x0c + i * 2)); }
     for (int k = 0; k < 3; k++) off[k] = (s16)mem_r16(c, st + k * 2);   // muzzle, in the gun's own space
     for (int i = 0; i < 3; i++) {
-        double eye = (s32)mem_r32(c, vo + 0x20 + i * 4);
+        double eye = g_aim_origin_set ? g_aim_origin[i] : (s32)mem_r32(c, vo + 0x20 + i * 4);
         double mo = m[i * 3 + 0] * off[0] + m[i * 3 + 1] * off[1] + m[i * 3 + 2] * off[2];
         mem_w32(c, obj + 0x28 + i * 4, (u32)(s32)lround(eye - mo));
     }
+    // the firing code also uses the view's eye: it is the mod's eye for the duration of the call
+    u32 eye_saved[3];
+    for (int i = 0; i < 3; i++) eye_saved[i] = mem_r32(c, vo + 0x20 + i * 4);
+    if (g_aim_origin_set) for (int i = 0; i < 3; i++) mem_w32(c, vo + 0x20 + i * 4, (u32)g_aim_origin[i]);
     orig(c);
     log_shot(c, obj, "(aimed)");
+    for (int i = 0; i < 3; i++) mem_w32(c, vo + 0x20 + i * 4, eye_saved[i]);
     if (mem_r32(c, 0x800efdc8) == obj) {
         for (int i = 0; i < 9; i++) mem_w16(c, obj + 0x14 + i * 2, rot[i]);
         for (int i = 0; i < 3; i++) mem_w32(c, obj + 0x28 + i * 4, pos[i]);
     }
+}
+
+// 8006c05c() returns the target the hero's shots go to (his lock-on target), or 0. In a mod's
+// first-person view a target is only used when it lies within 3 degrees of the screen centre, so
+// shots go where you look instead of jumping to an enemy elsewhere on screen.
+static void hook_shot_target(Ctx* c, RecompFn orig) {
+    orig(c);
+    u32 t = c->r[2];
+    if (!g_aim_to_view || !g_aim_origin_set || (t >> 24) != 0x80) return;
+    const u32 vo = 0x800f0110;
+    double along = 0, d2 = 0, p[3], f[3];
+    for (int i = 0; i < 3; i++) {
+        p[i] = (s16)mem_r16(c, t + 0x44 + i * 2) - (double)g_aim_origin[i];
+        f[i] = (s16)mem_r16(c, vo + 0x0c + i * 6 + 4) / 4096.0;
+        along += p[i] * f[i];
+    }
+    for (int i = 0; i < 3; i++) { double q = p[i] - f[i] * along; d2 += q * q; }
+    if (along <= 0 || sqrt(d2) > along * 0.0524) c->r[2] = 0;   // tan(3 deg)
 }
 
 // debug: --trace_fn ADDR logs every call of a main-image function with a0..a3 and the guest call stack
@@ -421,6 +446,7 @@ static void hook_trace(Ctx* c, RecompFn orig) {
 
 void game_init() {
     hook_set(0x80073474, hook_fire);
+    hook_set(0x8006c05c, hook_shot_target);
     hook_set(0x80073804, hook_fire);
     if (g_trace_fn) hook_set(g_trace_fn, hook_trace);
     hook_set(0x80015b50, hook_cam_stick);

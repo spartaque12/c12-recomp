@@ -133,6 +133,7 @@ static void restore(uint32_t hero, int scope) {
     if (is_ptr(hero) && !scope) set_hidden(hero, 0);
     api->set_fov(1.0f);
     api->game_option("aim_to_view", 0);
+    api->set_aim_origin(0, 0, 0, 0);
     api->game_option("laser_beam", 1);
     api->game_option("pad_forward", 0);
     cur_move_a = -1;
@@ -144,6 +145,9 @@ static void restore(uint32_t hero, int scope) {
 
 /* Put the eye at the hero's head, hide his body, set the field of view. Runs after the game's camera
  * update and again right before the world is drawn (the game moves the eye a little in between). */
+static int32_t saved_eye[3];
+static uint32_t saved_eye_vo;
+static int in_render;               /* inside the game's render function (8003836c) */
 static void apply(void) {
     uint32_t cam = g_cam;
     if (!is_ptr(cam)) return;
@@ -224,7 +228,15 @@ static void apply(void) {
     }
     for (int i = 0; i < 3; i++) vm_eye[i] = (float)r32(hero + 0x28 + i * 4) + vm_f[i] * eye_fwd;
     vm_eye[1] -= eye_up;
-    for (int i = 0; i < 3; i++) w32(vo + 0x20 + i * 4, (int)vm_eye[i]);
+    api->set_aim_origin(1, (int)vm_eye[0], (int)vm_eye[1], (int)vm_eye[2]);
+    /* only for drawing: the game logic keeps its own camera position (see render_hook) */
+    if (in_render) {
+        if (saved_eye_vo != vo) {
+            for (int i = 0; i < 3; i++) saved_eye[i] = r32(vo + 0x20 + i * 4);
+            saved_eye_vo = vo;
+        }
+        for (int i = 0; i < 3; i++) w32(vo + 0x20 + i * 4, (int)vm_eye[i]);
+    }
     set_hidden(hero, hide_body);
     /* view direction as a facing angle (4096 per turn, forward = (sin a, 0, cos a)) */
     int view_a = (int)(atan2_4096(vm_f[0], vm_f[2])) & 0xfff;
@@ -347,6 +359,22 @@ static void draw_hook(uint32_t* r, C12OrigFn orig) {
     orig(r);
 }
 
+/* 8003836c renders a frame: the camera update and every draw happen inside it, the game logic (controls,
+ * shooting) before it. The eye sits in the hero's head only during it; afterwards the game's own camera
+ * position is put back, because the game works out camera-relative controls (on ladders, on top of
+ * boxes) and smooths its camera from it, and a camera inside the hero breaks both. */
+static void render_hook(uint32_t* r, C12OrigFn orig) {
+    saved_eye_vo = 0;
+    in_render = 1;
+    apply();
+    orig(r);
+    in_render = 0;
+    if (saved_eye_vo) {
+        for (int i = 0; i < 3; i++) w32(saved_eye_vo + 0x20 + i * 4, saved_eye[i]);
+        saved_eye_vo = 0;
+    }
+}
+
 static void weapon_hook(uint32_t* r, C12OrigFn orig) {
     uint32_t hero = (uint32_t)r32(0x800efdb8), cur = (uint32_t)r32(0x800efdc8);
     orig(r);
@@ -414,5 +442,5 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("vm_yaw", "Weapon: turn (degrees)", &vm_yaw, -180.0f, 180.0f);
     api->setting_float("vm_pitch", "Weapon: tilt (degrees)", &vm_pitch, -90.0f, 90.0f);
     api->hook(0x8005f380, sfx_hook);
-    return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook) && api->hook(0x8002c048, physics_hook);
+    return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook) && api->hook(0x8002c048, physics_hook) && api->hook(0x8003836c, render_hook);
 }
