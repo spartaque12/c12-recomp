@@ -61,8 +61,7 @@ C = L2, Enter = Start, G = Select. XInput pads work at the same time (analog sti
   add main-EXE addresses to `seeds_main.txt` (overlay offsets to `seeds_<name>.txt`) and rebuild.
 * The game's logic is fixed-step at 25 Hz. `interp=1` (default) draws a motion-interpolated in-between frame for every
   game frame: 50 pictures per second at correct speed, +1 refresh (~20 ms) of display delay. Sprites/particles, the
-  sky and a few near-camera ground pieces are not interpolated. `fps60=1` is the old 2x-speed switch.
-* Widescreen visibility: the game's view-frustum corner rays (80065db8) are widened so geometry at the screen edges
+  sky and a few near-camera ground pieces are not interpolated.* Widescreen visibility: the game's view-frustum corner rays (80065db8) are widened so geometry at the screen edges
   is not culled. All 3D polygons are perspective-correct, including the game's screen-space subdivided near polygons.
 * Widescreen: HUD and menu elements are re-proportioned and anchored automatically (`hud_fix`); 2D effects drawn
   inside the 3D scene (not through the HUD layer) are still stretched.

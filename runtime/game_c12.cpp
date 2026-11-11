@@ -208,12 +208,6 @@ static void hook_vsync_wait(Ctx* c, RecompFn) {
         if (++guard > 2000000) { logf("VSync wait stuck (target %d, count %d)\n", target, rd(G_VCOUNT)); break; }
     }
 }
-// The gameplay loop waits VSync(2) => 25 fps. Its logic is scaled by elapsed vblanks, so waiting a
-// single vblank doubles the frame rate without changing game speed.
-static void hook_vsync(Ctx* c, RecompFn orig) {
-    if (g_cfg.fps60 && c->r[31] == 0x80038030 && c->r[4] == 2) c->r[4] = 0;  // VSync(0): next vblank
-    orig(c);
-}
 
 // ---- overlays ----------------------------------------------------------------------------------
 // 800612b8(image, relocs) relocates a freshly loaded RELOCS\*.LVB image in place. Tell the core
@@ -319,7 +313,6 @@ void game_init() {
     hook_set(0x80065db8, hook_frustum_corners);
     hook_set(0x800612b8, hook_relocate);
     hook_set(0x800a1128, hook_vsync_wait);
-    hook_set(0x800a0fb0, hook_vsync);
     g_main_fibre.handle = ConvertThreadToFiber(nullptr);
     g_cs = g_main_fibre.cs;
     hook_set(0x80035970, hook_fibre_start);

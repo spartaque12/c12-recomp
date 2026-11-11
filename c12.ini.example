@@ -20,7 +20,6 @@ height=720
 cpu_bias=1.00       # 2.0 = original console CPU speed, lower = faster
 cd_fast=4          # loading speed multiplier
 interp=1           # frame interpolation: smooth 50 fps at correct game speed
-fps60=0            # EXPERIMENTAL 50 fps (game runs 2x fast)
 
 # --- audio ---
 volume=1.00

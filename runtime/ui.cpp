@@ -86,7 +86,7 @@ void settings_save(const char* path) {
     fprintf(f, "cpu_bias=%.2f       # 2.0 = original console CPU speed, lower = faster\n", c.cpu_bias);
     fprintf(f, "cd_fast=%d          # loading speed multiplier\n", g_cd_fast);
     fprintf(f, "interp=%d           # frame interpolation: smooth 50 fps at correct game speed\n", c.interp);
-    fprintf(f, "fps60=%d            # EXPERIMENTAL 50 fps (game runs 2x fast)\n\n# --- audio ---\n", c.fps60);
+    fprintf(f, "\n# --- audio ---\n");
     fprintf(f, "volume=%.2f\naudio_interp=%d     # 0 nearest, 1 linear, 2 console-like, 3 cubic\nreverb=%d\naudio_latency_ms=%d\n\n# --- input ---\n",
             c.volume, c.audio_interp, c.reverb, c.audio_latency_ms);
     fprintf(f, "mouse=%d\nmouse_sens=%.2f\nmouse_invert_x=%d\nmouse_invert_y=%d\nmouse_aim_invert=%d\nmouse_direct_aim=%d\nmouse_direct_cam=%d\ncam_autocenter=%d\npause_in_menu=%d\n", c.mouse, c.mouse_sens, c.mouse_invert_x, c.mouse_invert_y, c.mouse_aim_invert, c.mouse_direct_aim, c.mouse_direct_cam, c.cam_autocenter, c.pause_in_menu);
@@ -176,8 +176,6 @@ static void draw_menu() {
             { bool bi = g_cfg.interp; if (ImGui::Checkbox("Frame interpolation (smooth 50 fps, correct game speed)", &bi)) g_cfg.interp = bi; }
             ImGui::TextDisabled("Draws an in-between frame from tracked vertex motion; adds ~20 ms of display delay");
             ImGui::SliderInt("Loading speed", &g_cd_fast, 1, 8, "%dx");
-            bool b = g_cfg.fps60;
-            if (ImGui::Checkbox("50 fps (experimental: the game runs 2x fast)", &b)) g_cfg.fps60 = b;
             ImGui::TextDisabled("Hold ` (backquote) to fast-forward");
             ImGui::EndTabItem();
         }

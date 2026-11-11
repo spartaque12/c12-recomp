@@ -57,7 +57,7 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k == "width") I(g_cfg.win_w);
     else if (k == "height") I(g_cfg.win_h);
     else if (k == "cpu_bias") g_cfg.cpu_bias = atof(v.c_str());
-    else if (k == "fps60") I(g_cfg.fps60);
+    else if (k == "fps60") {}   // removed option (2x-speed 50 fps); still accepted in old ini files
     else if (k == "audio_interp") I(g_cfg.audio_interp);
     else if (k == "audio_latency_ms") I(g_cfg.audio_latency_ms);
     else if (k == "reverb") I(g_cfg.reverb);

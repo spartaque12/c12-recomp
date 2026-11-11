@@ -26,7 +26,6 @@ struct Config {
     int fullscreen = 0;
     int win_w = 1280, win_h = 720;
     double cpu_bias = 2.0;      // sysclk cycles per instruction (lower = faster CPU)
-    int fps60 = 0;
     int audio_interp = 2;       // 0 nearest 1 linear 2 gaussian 3 cubic
     int audio_latency_ms = 40;
     int reverb = 1;
