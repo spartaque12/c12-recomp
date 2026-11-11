@@ -11,7 +11,7 @@
  *                   4096 = 1.0, columns = right / down / forward) at +0x0c, eye position (3 x s32)
  *                   at +0x20.
  *   800efdfc        bit 0x400 while the game's own scope view (R2) is open (800f0ca4 = 1 then too;
- *                   800f1338 = 1 only in some places).
+ *                   800f1338 = 1 only in some places - it is a general "menu open" flag).
  *   80065494        draws the world.
  *   800efdb8        pointer to the hero object. An object carries a world MATRIX at +0x14 (rotation
  *                   3x3 s16, position 3 x s32 at +0x28; the hero's position is at his feet and y
@@ -82,7 +82,7 @@ static int16_t r16(uint32_t a) { int16_t v; memcpy(&v, api->ram + (a & 0x1FFFFF)
 static int32_t r32(uint32_t a) { int32_t v; memcpy(&v, api->ram + (a & 0x1FFFFF), 4); return v; }
 static void w16(uint32_t a, int v) { int16_t s = (int16_t)v; memcpy(api->ram + (a & 0x1FFFFF), &s, 2); }
 static void w32(uint32_t a, int32_t v) { memcpy(api->ram + (a & 0x1FFFFF), &v, 4); }
-static int scope_open(void) { return (r32(0x800efdfc) & 0x400) || r16(0x800f0ca4) == 1 || r32(0x800f1338) == 1; }
+static int scope_open(void) { return (r32(0x800efdfc) & 0x400) || r16(0x800f0ca4) == 1; }
 static int is_ptr(uint32_t p) { return p >= 0x80010000u && p < 0x80200000u && (p & 3) == 0; }
 
 /* an object's model instance, or 0 */
@@ -189,10 +189,12 @@ static void apply(void) {
     /* Menus opened in play (inventory, giving an item to someone) draw their item icons as 3D models
      * placed in front of the game's camera, and wait for them to settle before taking input: the
      * game's own camera is kept while one is open. They switch the player's controls off
-     * (*(hero+0xbc)+0x108 bit 0x40; the inventory also sets 800efdfc bit 0x80). */
+     * (*(hero+0xbc)+0x108 bit 0x40; the inventory also sets 800efdfc bit 0x80). Menus in general,
+     * also the save point's memory card menu, set 800f1338 = 1 (outside the scope view). */
     if (!cutscene && is_ptr(hero)) {
         uint32_t st = (uint32_t)r32(hero + 0xbc);
         if ((r32(0x800efdfc) & 0x80) || (is_ptr(st) && (r16(st + 0x108) & 0x40))) cutscene = 1;
+        if (!scope && r32(0x800f1338) == 1) cutscene = 1;
     }
     if (enabled && scope && !cutscene) {
         if (!in_scope) {
