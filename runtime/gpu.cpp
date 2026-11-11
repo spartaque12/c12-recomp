@@ -117,7 +117,19 @@ static bool g_sub_window;              // the list being laid out draws into a w
 struct Placed { Box b; Tf t; int frame; };
 static std::vector<Placed> g_placed;    // where the elements of the lists drawn so far ended up
 static int g_ot_slots_cur;             // ordering-table size of the list being walked
+int g_dbg_skip;   // debug: skip classes of primitives (1 small lists, 2 world ot>=990, 4 world ot<50, 8 world ot 900..989, 16 lists drawn through a window)
 static bool prim_2d(int x0, int y0, int x1, int y1, int is3d = 0) {
+    if (g_dbg_skip && !g_collect) {
+        if ((g_dbg_skip & 1) && g_ot_slots_cur <= 64) return true;
+        if ((g_dbg_skip & 2) && g_ot_slots_cur >= 1024 && g_ot_index >= 990) return true;
+        if ((g_dbg_skip & 4) && g_ot_slots_cur >= 1024 && g_ot_index < 50) return true;
+        if ((g_dbg_skip & 8) && g_ot_slots_cur >= 1024 && g_ot_index >= 900 && g_ot_index < 990) return true;
+        if ((g_dbg_skip & 16) && g_st.cx2 - g_st.cx1 < 450) return true;
+        if ((g_dbg_skip & 32) && g_ot_slots_cur >= 1024 && g_ot_index >= 990 && x1 - x0 <= 2) return true;
+        if ((g_dbg_skip & 64) && g_ot_slots_cur >= 1024 && g_ot_index >= 990 && g_ot_index < 1015) return true;
+        if ((g_dbg_skip & 128) && g_ot_slots_cur >= 1024 && g_ot_index >= 1015 && x1 - x0 == 256) return true;
+        if ((g_dbg_skip & 256) && g_ot_slots_cur >= 1024 && g_ot_index >= 1015 && x1 - x0 >= 500) return true;
+    }
     if (g_collect) {
         g_box3d.push_back((u8)is3d);
         if (g_boxes.empty()) { g_clip_l = g_st.cx1; g_clip_r = g_st.cx2 + 1; g_clip_t = g_st.cy1; g_clip_b = g_st.cy2 + 1; }   // the list sets its own drawing area
@@ -258,6 +270,8 @@ static bool g_in_list;
 static bool g_list_had_3d;  // the list being replayed contained tracked 3D polygons
 static bool g_list_3d;     // the display list being drawn is the world (large ordering table)
 
+static int g_scope_seen = -100;   // last frame that drew the scope's scan-line strips
+int g_scope_overlay = 1;          // 0 = mods asked for the scope view without its overlay
 static void draw_polygon() {
     u32 cmd = g_fifo[0] >> 24;
     bool gouraud = cmd & 0x10, quad = cmd & 0x08, tex = cmd & 0x04;
@@ -412,7 +426,6 @@ static void draw_polygon() {
     if (quad && (keep_big || !oversize(v + 1))) g_be->tri(v + 1, g_st);
 }
 
-int g_scope_overlay = 1;   // 0 = mods asked for the scope view without scan lines and tint
 static void draw_rect() {
     u32 cmd = g_fifo[0] >> 24;
     bool tex = cmd & 4;
@@ -437,9 +450,10 @@ static void draw_rect() {
     if (!g_scope_overlay && g_list_3d) {
         // The scope view's scan lines are 256x1 strips that re-draw every other line from the frame
         // buffer itself; its green tint is one translucent flat rectangle over the whole picture.
-        static int seen = -100;
-        if (tex && h == 1 && w == 256 && g_st.depth == 2) { seen = g_frame; return; }
-        if (!tex && (cmd & 2) && w >= 500 && h >= 150 && g_frame - seen <= 4) return;
+        // The black bars above and below are two opaque 512x32 rectangles.
+        if (tex && h == 1 && w == 256 && g_st.depth == 2) { g_scope_seen = g_frame; return; }
+        if (!tex && (cmd & 2) && w >= 500 && h >= 150 && g_frame - g_scope_seen <= 4) return;
+        if (!tex && !(cmd & 2) && w >= 500 && h == 32 && g_frame - g_scope_seen <= 4) return;
     }
     g_be->rect(x, y, w, h, uv & 0xFF, (uv >> 8) & 0xFF, g_fifo[0] & 0xFFFFFF, g_st);
 }
@@ -450,6 +464,8 @@ static void draw_line_seg(const GpuVtx& a, const GpuVtx& b, bool gouraud, bool s
     g_dbg_lines++;
     if (prim_2d(std::min(a.x, b.x), std::min(a.y, b.y), std::max(a.x, b.x) + 1, std::max(a.y, b.y) + 1)) return;
     if (g_dbg_gpu & 1) return;
+    // The scope view's rounded corners are drawn as lines in the front-most slots of the world list.
+    if (!g_scope_overlay && g_list_3d && g_ot_index >= 1015 && g_frame - g_scope_seen <= 4) return;
     g_st.textured = false;
     g_st.raw = false;
     g_st.semi = semi;
@@ -494,6 +510,7 @@ static void exec_cmd() {
     if (cmd >= 0x80 && cmd < 0xA0) {
         int sx = g_fifo[1] & 0x3FF, sy = (g_fifo[1] >> 16) & 0x1FF, dx = g_fifo[2] & 0x3FF, dy = (g_fifo[2] >> 16) & 0x1FF;
         int cw = ((g_fifo[3] & 0xFFFF) - 1 & 0x3FF) + 1, ch = (((g_fifo[3] >> 16) & 0xFFFF) - 1 & 0x1FF) + 1;
+        if (g_log_level >= 3 && !g_collect && !g_noside && (g_frame % 100) < 2) logf("vram copy %d,%d -> %d,%d %dx%d (frame %d)\n", sx, sy, dx, dy, cw, ch, g_frame);
         if (!g_collect && !g_noside) g_be->copy(sx, sy, dx, dy, cw, ch, g_st);
         return;
     }
@@ -557,6 +574,7 @@ void gpu_write_gp0(u32 v) {
         if ((size_t)g_xfer_pos < total) g_xfer_buf[g_xfer_pos++] = (u16)(v >> 16);
         if ((size_t)g_xfer_pos >= total) {
             g_xfer_mode = 0;
+            if (g_log_level >= 3 && g_xfer_x < 512 && (g_frame % 100) < 2) logf("upload into frame buffer: %d,%d %dx%d (frame %d)\n", g_xfer_x, g_xfer_y, g_xfer_w, g_xfer_h, g_frame);
             if (!g_collect && !g_noside) g_be->upload(g_xfer_x, g_xfer_y, g_xfer_w, g_xfer_h, g_xfer_buf.data(), g_st);
         }
         return;

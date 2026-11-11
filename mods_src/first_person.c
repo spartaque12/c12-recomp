@@ -40,6 +40,9 @@ static int viewmodel = 1;          /* draw the weapon at a fixed place in front 
 static float vm_right = 60.0f, vm_down = 70.0f, vm_fwd = 170.0f;
 static float vm_yaw = 0.0f, vm_pitch = 0.0f;   /* degrees */
 
+static int direct_look = 1;        /* mouse turns the view directly, no camera easing */
+static float look_yaw, look_pitch;
+static int look_valid, saved_ac2 = -1;
 static int was_on;                 /* the mod changed the game's state last frame */
 static int saved_autocenter = -1;
 static uint32_t g_cam;             /* the camera the game updated this frame */
@@ -97,8 +100,10 @@ static void apply(void) {
     if (!enabled || !is_ptr(hero) || !is_ptr(vo) || scope) { restore(hero, scope); return; }
     if (!was_on) saved_autocenter = -1;
     was_on = 1;
-    if (strafe) { int prev = api->game_option("cam_autocenter", 0); if (saved_autocenter < 0) saved_autocenter = prev; }
-    else if (saved_autocenter >= 0) { api->game_option("cam_autocenter", saved_autocenter); saved_autocenter = -1; }
+    if (!direct_look) {   /* without direct look, strafing relies on the runtime's "hold direction" option */
+        if (strafe) { int prev = api->game_option("cam_autocenter", 0); if (saved_autocenter < 0) saved_autocenter = prev; }
+        else if (saved_autocenter >= 0) { api->game_option("cam_autocenter", saved_autocenter); saved_autocenter = -1; }
+    }
     for (int i = 0; i < 3; i++) {
         vm_r[i] = r16(vo + 0x0c + i * 6 + 0) / 4096.0f;
         vm_d[i] = r16(vo + 0x0c + i * 6 + 2) / 4096.0f;
@@ -136,9 +141,54 @@ static void place_weapon(uint32_t gun) {
     }
 }
 
+static int sext12(int v) { v &= 0xfff; return v >= 0x800 ? v - 0x1000 : v; }
+
+/* Direct look: the mod keeps the view angles itself (cam+0x20 pitch, cam+0x22 yaw, 4096 per turn,
+ * pitch 0 = level), adds the raw mouse movement to them and rebuilds the view rotation from them with
+ * the game's own angle-to-matrix routine (800a1db8). The game's camera normally eases towards a
+ * target direction; that easing is what made mouse look feel slow. */
 static void camera_hook(uint32_t* r, C12OrigFn orig) {
-    g_cam = r[4];
+    uint32_t cam = r[4];
+    uint32_t hero = (uint32_t)r32(0x800efdb8), vo = (uint32_t)r32(cam + 0x40);
+    /* the game updates more than one camera per frame; only the one that follows the hero is ours */
+    if (!is_ptr(hero) || !is_ptr(vo) || (uint32_t)r32(cam + 0x44) != hero + 0x14) { orig(r); return; }
+    g_cam = cam;
+    int active = enabled && direct_look && r32(0x800f1338) != 1;
+    if (active) {
+        if (!look_valid) {
+            look_yaw = (float)(r16(cam + 0x22) & 0xfff);
+            look_pitch = (float)sext12(r16(cam + 0x20));
+            saved_ac2 = api->game_option("cam_autocenter", 1);   /* the runtime's own "hold direction" would fight this */
+            look_valid = 1;
+        }
+        float dy = 0, dp = 0;
+        api->mouse_look(&dy, &dp);
+        look_yaw += dy;
+        look_pitch -= dp;
+        w16(cam + 0x20, (int)look_pitch & 0xfff);
+        w16(cam + 0x22, (int)look_yaw & 0xfff);
+    }
     orig(r);
+    if (active) {
+        if (!strafe) {   /* let the game swing the view behind the hero as in third person */
+            look_yaw = (float)(r16(cam + 0x22) & 0xfff);
+            look_pitch = (float)sext12(r16(cam + 0x20));
+        }
+        if (look_pitch > 900.0f) look_pitch = 900.0f;
+        if (look_pitch < -900.0f) look_pitch = -900.0f;
+        while (look_yaw >= 4096.0f) look_yaw -= 4096.0f;
+        while (look_yaw < 0.0f) look_yaw += 4096.0f;
+        w16(cam + 0x20, (int)look_pitch & 0xfff);
+        w16(cam + 0x22, (int)look_yaw & 0xfff);
+        uint32_t v0 = r[2], v1 = r[3];
+        r[4] = cam + 0x20;
+        r[5] = vo + 0x0c;
+        api->call(0x800a1db8);
+        r[2] = v0; r[3] = v1;
+    } else if (look_valid) {
+        look_valid = 0;
+        if (saved_ac2 >= 0) api->game_option("cam_autocenter", saved_ac2);
+    }
     apply();   /* the weapon's callback, later in the frame, needs this frame's view */
 }
 
@@ -169,6 +219,7 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("fov", "Field of view (1 = original)", &fov, 0.7f, 2.0f);
     api->setting_float("eye_up", "Eye height", &eye_up, 150.0f, 450.0f);
     api->setting_float("eye_fwd", "Eye forward / back", &eye_fwd, -150.0f, 150.0f);
+    api->setting_bool("direct_look", "Direct mouse look (no camera easing)", &direct_look);
     api->setting_bool("strafe", "Keep looking where you aim while moving (strafe)", &strafe);
     api->setting_bool("hide_body", "Hide the hero's body", &hide_body);
     api->setting_bool("clean_scope", "Scope view (R2) without scan lines, tint and hum", &clean_scope);

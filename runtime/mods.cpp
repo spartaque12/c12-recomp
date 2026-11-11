@@ -52,6 +52,13 @@ static void api_setting_float(const char* key, const char* label, float* value, 
 }
 static void api_set_fov(float m) { g_fov_mult = m < 0.3f ? 0.3f : m > 3.0f ? 3.0f : m; }
 extern int g_scope_overlay;
+extern long g_cam_mx, g_cam_my;
+static void api_mouse_look(float* yaw, float* pitch) {
+    float scale = 0.55f * g_cfg.mouse_sens;
+    if (yaw) *yaw = (float)g_cam_mx * scale;
+    if (pitch) *pitch = (float)g_cam_my * scale;
+    g_cam_mx = g_cam_my = 0;
+}
 static int api_game_option(const char* key, int value) {
     int* p = !key ? nullptr : !strcmp(key, "cam_autocenter") ? &g_cfg.cam_autocenter : !strcmp(key, "mouse_direct_cam") ? &g_cfg.mouse_direct_cam :
              !strcmp(key, "interp") ? &g_cfg.interp : !strcmp(key, "scope_overlay") ? &g_scope_overlay : nullptr;
@@ -142,6 +149,7 @@ void mods_init() {
     api.setting_float = api_setting_float;
     api.set_fov = api_set_fov;
     api.game_option = api_game_option;
+    api.mouse_look = api_mouse_look;
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA((dir + "\\*.dll").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;

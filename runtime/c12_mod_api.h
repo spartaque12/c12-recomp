@@ -53,6 +53,11 @@ typedef struct C12ModApi {
      * "mouse_direct_cam" (0/1), "interp" (0/1), "scope_overlay" (0 = draw the game's scope view
      * without its scan lines and green tint). */
     int (*game_option)(const char* key, int value);
+    /* Take the mouse movement collected since the last call, already scaled by the user's
+     * sensitivity and invert settings into game angle units (4096 = full turn): yaw > 0 = right,
+     * pitch > 0 = down. The runtime's own camera mouse-look then sees no movement. (Movement is only
+     * collected outside the scope view and while "raw mouse camera" is on.) */
+    void (*mouse_look)(float* yaw, float* pitch);
 } C12ModApi;
 
 #ifdef __cplusplus
