@@ -35,6 +35,19 @@ static float fov = 1.25f;          /* field-of-view multiplier while the mod is 
 static float eye_up = 300.0f;      /* eye height above the feet, game units (the hero is ~330 tall) */
 static float eye_fwd = 0.0f;
 static int hide_body = 1;
+static int face_view = 1;          /* the hero always faces where you look (shots go to the crosshair) */
+
+/* atan2 in game angle units (4096 per turn), no math library */
+static float atan2_4096(float y, float x) {
+    float ax = x < 0 ? -x : x, ay = y < 0 ? -y : y;
+    if (ax < 1e-6f && ay < 1e-6f) return 0.0f;
+    float t = ax > ay ? ay / ax : ax / ay;                     /* 0..1 */
+    float r = t * 0.7853981634f - t * (t - 1.0f) * (0.2447f + 0.0663f * t);
+    if (ay > ax) r = 1.5707963268f - r;
+    if (x < 0) r = 3.1415926536f - r;
+    if (y < 0) r = -r;
+    return r * (4096.0f / 6.2831853072f);
+}
 static int strafe = 1;             /* keep the view direction while moving (camera auto-centre off) */
 static int clean_scope = 1;        /* the game's own scope view (R2) without its overlay and sound */
 static int viewmodel = 1;          /* draw the weapon at a fixed place in front of the eye */
@@ -117,6 +130,24 @@ static void apply(void) {
     vm_eye[1] -= eye_up;
     for (int i = 0; i < 3; i++) w32(vo + 0x20 + i * 4, (int)vm_eye[i]);
     set_hidden(hero, hide_body);
+    if (face_view) {
+        /* Turn the hero to where the view looks, so he shoots at the crosshair. His facing is an angle
+         * (4096 per turn, forward = (sin a, 0, cos a)) kept in several copies in the hero object and
+         * in his controller (hero+0xb0), and his matrix is a turn about the vertical axis by it. */
+        int a = (int)(atan2_4096(vm_f[0], vm_f[2])) & 0xfff;
+        static const int hero_offs[] = {0x116, 0x118, 0x11e, 0x120, 0x126, 0x128, 0x12e, 0x130, 0x154};
+        for (int i = 0; i < (int)(sizeof hero_offs / sizeof hero_offs[0]); i++) w16(hero + hero_offs[i], a);
+        uint32_t ctl = (uint32_t)r32(hero + 0xb0);
+        if (is_ptr(ctl)) {
+            static const int ctl_offs[] = {0x50, 0x5c, 0x68, 0x74, 0xa8};
+            for (int i = 0; i < (int)(sizeof ctl_offs / sizeof ctl_offs[0]); i++) w16(ctl + ctl_offs[i], a);
+        }
+        float c = fcos(a * (360.0f / 4096.0f)), s = fsin(a * (360.0f / 4096.0f));
+        w16(hero + 0x14 + 0, (int)(c * 4096.0f));    /* m00 */
+        w16(hero + 0x14 + 4, (int)(s * 4096.0f));    /* m02 */
+        w16(hero + 0x14 + 12, (int)(-s * 4096.0f));  /* m20 */
+        w16(hero + 0x14 + 16, (int)(c * 4096.0f));   /* m22 */
+    }
     api->set_fov(fov);
     vm_ok = 1;
 }
@@ -225,6 +256,7 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("eye_fwd", "Eye forward / back", &eye_fwd, -150.0f, 150.0f);
     api->setting_bool("direct_look", "Direct mouse look (no camera easing)", &direct_look);
     api->setting_bool("strafe", "Keep looking where you aim while moving (strafe)", &strafe);
+    api->setting_bool("face_view", "Hero faces where you look (shots go to the crosshair)", &face_view);
     api->setting_bool("hide_body", "Hide the hero's body", &hide_body);
     api->setting_bool("clean_scope", "Scope view (R2) without scan lines, tint and hum", &clean_scope);
     api->setting_bool("viewmodel", "Weapon view model", &viewmodel);
