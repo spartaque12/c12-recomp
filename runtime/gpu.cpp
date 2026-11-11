@@ -475,10 +475,17 @@ static void draw_rect() {
 
 
 static int g_dbg_lines, g_dbg_thin;
+int g_laser_beam = 1;   // 0 = mods hide the laser sight's beam (lines), keeping its dot
 static void draw_line_seg(const GpuVtx& a, const GpuVtx& b, bool gouraud, bool semi) {
     g_dbg_lines++;
     if (prim_2d(std::min(a.x, b.x), std::min(a.y, b.y), std::max(a.x, b.x) + 1, std::max(a.y, b.y) + 1)) return;
     if (g_dbg_gpu & 1) return;
+    // The laser sight's beam: red lines in the 3D scene (its dot is a separate sprite). Mods can hide it.
+    if (!g_laser_beam && g_list_3d) {
+        u32 col = a.rgb;
+        int r = col & 0xFF, gc = (col >> 8) & 0xFF, bc = (col >> 16) & 0xFF;
+        if (r > 40 && r > gc * 2 && r > bc * 2) return;
+    }
     // The scope view's rounded corners are drawn as lines in the front-most slots of the world list.
     if (!g_scope_overlay && g_list_3d && g_ot_index >= 1015 && g_frame - g_scope_seen <= 4) return;
     g_st.textured = false;

@@ -54,6 +54,7 @@ static void api_set_fov(float m) { g_fov_mult = m < 0.3f ? 0.3f : m > 3.0f ? 3.0
 extern int g_scope_overlay;
 extern int g_aim_to_view;
 extern int g_pad_forward;
+extern int g_laser_beam;
 extern long g_cam_mx, g_cam_my;
 u16 pad_user_buttons();
 void pad_user_analog(u8 out[4]);
@@ -72,7 +73,7 @@ static void api_mouse_look(float* yaw, float* pitch) {
 }
 static int api_game_option(const char* key, int value) {
     int* p = !key ? nullptr : !strcmp(key, "cam_autocenter") ? &g_cfg.cam_autocenter : !strcmp(key, "mouse_direct_cam") ? &g_cfg.mouse_direct_cam :
-             !strcmp(key, "interp") ? &g_cfg.interp : !strcmp(key, "scope_overlay") ? &g_scope_overlay : !strcmp(key, "aim_to_view") ? &g_aim_to_view : !strcmp(key, "pad_forward") ? &g_pad_forward : nullptr;
+             !strcmp(key, "interp") ? &g_cfg.interp : !strcmp(key, "scope_overlay") ? &g_scope_overlay : !strcmp(key, "aim_to_view") ? &g_aim_to_view : !strcmp(key, "pad_forward") ? &g_pad_forward : !strcmp(key, "laser_beam") ? &g_laser_beam : nullptr;
     if (!p) return -1;
     int prev = *p;
     *p = value;

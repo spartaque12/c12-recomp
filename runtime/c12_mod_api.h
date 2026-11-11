@@ -51,7 +51,7 @@ typedef struct C12ModApi {
     /* Change one of the runtime's own options for as long as the mod needs it; returns the previous
      * value (-1 = unknown key) so the mod can put it back. Keys: "cam_autocenter" (0/1),
      * "mouse_direct_cam" (0/1), "interp" (0/1), "scope_overlay" (0 = draw the game's scope view
-     * without its scan lines and green tint), "pad_forward" (1 = the game sees only "run straight forward" as movement input, 2 = no movement input at all), "aim_to_view" (1 = shots go to the screen centre). */
+     * without its scan lines and green tint), "pad_forward" (1 = the game sees only "run straight forward" as movement input, 2 = no movement input at all), "aim_to_view" (1 = shots go to the screen centre), "laser_beam" (0 = hide the laser sight's beam, keep its dot). */
     int (*game_option)(const char* key, int value);
     /* Take the mouse movement collected since the last call, already scaled by the user's
      * sensitivity and invert settings into game angle units (4096 = full turn): yaw > 0 = right,

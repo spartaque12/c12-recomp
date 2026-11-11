@@ -39,6 +39,7 @@ static int hide_body = 1;
 static int direct_look = 1;        /* mouse turns the view directly, no camera easing */
 static float look_yaw, look_pitch;
 static int look_valid, saved_ac2 = -1;
+static int laser_beam = 0;         /* draw the laser sight's beam (its dot is always drawn) */
 static int face_view = 1;          /* the hero faces where you look when standing still */
 static int cs_move = 1;           /* move relative to the view at once: backpedal and strafe (CS-style) */
 static float scope_walk = 12.0f;    /* walking speed while aiming (game units per frame; running is 41) */
@@ -129,6 +130,7 @@ static void restore(uint32_t hero, int scope) {
     if (is_ptr(hero) && !scope) set_hidden(hero, 0);
     api->set_fov(1.0f);
     api->game_option("aim_to_view", 0);
+    api->game_option("laser_beam", 1);
     api->game_option("pad_forward", 0);
     cur_move_a = -1;
     if (saved_autocenter >= 0) { api->game_option("cam_autocenter", saved_autocenter); saved_autocenter = -1; }
@@ -243,6 +245,7 @@ static void apply(void) {
     }
     api->set_fov(fov);
     api->game_option("aim_to_view", 1);   /* shots go to the centre of the screen */
+    api->game_option("laser_beam", laser_beam);
     vm_ok = 1;
 }
 
@@ -381,6 +384,7 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_bool("cs_move", "CS-style movement (backpedal and strafe relative to the view)", &cs_move);
     api->setting_float("scope_walk", "Walking speed while aiming (0 = keys turn the aim; running is 41)", &scope_walk, 0.0f, 41.0f);
     api->setting_bool("scope_fov", "Same field of view in the scope (R2)", &scope_fov);
+    api->setting_bool("laser_beam", "Laser sight beam (the dot stays)", &laser_beam);
     api->setting_bool("face_view", "Hero faces where you look (shots go to the crosshair)", &face_view);
     api->setting_bool("hide_body", "Hide the hero's body", &hide_body);
     api->setting_bool("clean_scope", "Scope view (R2) without scan lines, tint and hum", &clean_scope);
