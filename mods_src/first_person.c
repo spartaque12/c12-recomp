@@ -50,6 +50,8 @@ static int last_view_a = -1;
 static int cur_move_a = -1;        /* wanted movement direction this frame, -1 = standing */
 static int in_scope, scope_frames, scope_entry_a = -1, scope_last_a = -1;
 static float look_sign = 1.0f;     /* +1 if the view's facing angle grows with the look yaw */
+static int last_view_p, scope_entry_p, scope_last_p;   /* up/down angles, + = up (4096 per turn) */
+static int look_set_pitch = 100000;   /* pending pitch for the direct look, 100000 = none */
 static float look_turn;           /* view turn owed to the direct look (in facing units) */
 
 /* atan2 in game angle units (4096 per turn), no math library */
@@ -156,9 +158,17 @@ static void apply(void) {
             in_scope = 1;
             scope_frames = 0;
             if (last_view_a >= 0) scope_entry_a = last_view_a;
+            scope_entry_p = last_view_p;
         }
-        if (scope_frames < 3 && scope_entry_a >= 0) { w16(0x800f0ca8, scope_entry_a); scope_frames++; }
+        if (scope_frames < 3 && scope_entry_a >= 0) {
+            /* and up/down: the scope's pitch (800f0ca6, + = up, +-780) */
+            int p = scope_entry_p > 780 ? 780 : scope_entry_p < -780 ? -780 : scope_entry_p;
+            w16(0x800f0ca8, scope_entry_a);
+            w16(0x800f0ca6, p);
+            scope_frames++;
+        }
         scope_last_a = r16(0x800f0ca8) & 0xfff;
+        scope_last_p = r16(0x800f0ca6);
         if (scope_walk > 0.0f) {
             /* walking while aiming: the movement keys no longer turn the aim (the mouse does), and the
              * hero is moved slowly along the scope's own view, relative to where it looks */
@@ -190,6 +200,7 @@ static void apply(void) {
         if (scope_entry_a >= 0 && scope_last_a >= 0) {
             int d = ((scope_last_a - scope_entry_a + 2048) & 0xfff) - 2048;
             look_turn += (float)d;
+            look_set_pitch = scope_last_p;   /* the view keeps the scope's up/down angle */
         }
         scope_entry_a = scope_last_a = -1;
     }
@@ -216,6 +227,10 @@ static void apply(void) {
     /* view direction as a facing angle (4096 per turn, forward = (sin a, 0, cos a)) */
     int view_a = (int)(atan2_4096(vm_f[0], vm_f[2])) & 0xfff;
     last_view_a = view_a;
+    {
+        float hz = fsqrt1(vm_f[0] * vm_f[0] + vm_f[2] * vm_f[2]);
+        last_view_p = -(int)atan2_4096(vm_f[1], hz);   /* the view's down axis is +y */
+    }
     int move_a = -1;
     if (cs_move) {
         /* CS-style movement: the game's controls are relative to the camera and the hero runs where he
@@ -297,6 +312,7 @@ static void camera_hook(uint32_t* r, C12OrigFn orig) {
         api->mouse_look(&dy, &dp);
         look_yaw += dy + look_turn * look_sign;
         look_turn = 0;
+        if (look_set_pitch != 100000) { look_pitch = (float)look_set_pitch; look_set_pitch = 100000; }
         look_pitch -= dp;
         w16(cam + 0x20, (int)look_pitch & 0xfff);
         w16(cam + 0x22, (int)look_yaw & 0xfff);
