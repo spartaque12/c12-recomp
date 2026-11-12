@@ -813,7 +813,10 @@ static void hw_present(const GpuDisplay& d) {
         bb->Release();
         g_bb_shot[0] = 0;
     }
-    swap->Present(g_cfg.vsync ? 1 : 0, (!g_cfg.vsync && tearing) ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    // while a VR mod paces the frames the headset sets the rhythm: the window must not wait for its vsync
+    extern void (*g_vr_pacer)(double until);
+    bool vs = g_cfg.vsync && !g_vr_pacer;
+    swap->Present(vs ? 1 : 0, (!vs && tearing) ? DXGI_PRESENT_ALLOW_TEARING : 0);
 }
 
 static bool hw_screenshot(const GpuDisplay& d, const char* path) {

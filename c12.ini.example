@@ -1,29 +1,28 @@
 # C-12: Final Resistance - recompiled. F1 or Esc in game opens the settings menu.
-cue=C:path	oC-12 - Final Resistance (Europe).cue
+cue=C:\path\to\C-12 - Final Resistance (Europe).cue
 
 # --- video ---
-scale=5            # internal resolution multiplier
+scale=4            # internal resolution multiplier
 widescreen=1       # 16:9 field of view
 hud_fix=1          # keep HUD/menus in proportion in widescreen
-pgxp=1             # sub-pixel vertex precision
-perspective=1      # perspective-correct texturing
+level3d=1          # native 3D renderer for the level (depth buffer)
 filter=0           # bilinear filtering of original textures
 hd_enabled=1       # use the HD texture pack
 hd_textures=hd_textures
 present_linear=1   # smooth (1) or sharp-pixel (0) scaling to the window
 vsync=0
-fullscreen=1
+fullscreen=0
 width=1280
 height=720
 
 # --- speed ---
-cpu_bias=1.00       # 2.0 = original console CPU speed, lower = faster
-cd_fast=4          # loading speed multiplier
+cpu_bias=2.00       # 2.0 = original console CPU speed, lower = faster
+cd_fast=1          # loading speed multiplier
 interp=1           # frame interpolation: smooth 50 fps at correct game speed
 
 # --- audio ---
 volume=1.00
-audio_interp=3     # 0 nearest, 1 linear, 2 console-like, 3 cubic
+audio_interp=2     # 0 nearest, 1 linear, 2 console-like, 3 cubic
 reverb=1
 audio_latency_ms=40
 
@@ -32,10 +31,10 @@ mouse=1
 mouse_sens=1.00
 mouse_invert_x=0
 mouse_invert_y=0
-mouse_aim_invert=1
+mouse_aim_invert=0
 mouse_direct_aim=1
 mouse_direct_cam=1
-cam_autocenter=1     # 0 = the camera keeps the direction you chose
+cam_autocenter=1
 pause_in_menu=1
 # key bindings: Windows virtual-key codes, two per button (0 = none)
 bind_select=71,161
@@ -58,3 +57,7 @@ bind_square=69,0
 # --- misc ---
 mods=mods
 log=1
+
+# --- mods ---
+mod.VR.enabled=1
+mod.First_person.enabled=1

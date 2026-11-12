@@ -20,3 +20,4 @@ states/
 bookmarks.txt
 mods/*.json
 mods_src/vr/third_party/openxr/bin/
+dist/
