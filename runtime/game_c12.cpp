@@ -281,6 +281,10 @@ bool level3d_capture(Ctx* c);
 static void hook_level_draw(Ctx* c, RecompFn orig) {
     if (!level3d_capture(c)) orig(c);   // captured: drawn natively when its display list is drawn
 }
+bool meshfx_capture(Ctx* c, RecompFn orig);
+static void hook_meshfx_draw(Ctx* c, RecompFn orig) {
+    if (!meshfx_capture(c, orig)) orig(c);
+}
 
 // ---- overlays ----------------------------------------------------------------------------------
 // 800612b8(image, relocs) relocates a freshly loaded RELOCS\*.LVB image in place. Tell the core
@@ -483,6 +487,7 @@ void game_init() {
     hook_set(0x80065db8, hook_frustum_corners);
     hook_set(0x800612b8, hook_relocate);
     hook_set(0x8006737c, hook_level_draw);
+    hook_set(0x80086810, hook_meshfx_draw);
     hook_set(0x800a1128, hook_vsync_wait);
     g_main_fibre.live = true;
     g_cs = g_main_fibre.cs;
