@@ -37,7 +37,7 @@
 #include <string.h>
 
 int g_level3d = 1;   // option level3d: 0 = the game's own level renderer
-int g_n3_parts = 7;  // option n3_parts (debug): native 1 level, 2 effect meshes, 4 objects
+int g_n3_parts = 31; // option n3_parts (debug): native 1 level, 2 effect meshes, 4 objects, 8 sky, 16 shadows + marks
 
 extern float g_ws_scale, g_fov_mult;
 
@@ -55,7 +55,7 @@ struct Camera { float R[9]; float eye[3]; float h, ofx, ofy; };
 // against the rest). bias: the group is pulled toward the eye by this fraction of its depth (decals,
 // shadows lying on a surface; the screen position does not change).
 enum { GK_NORMAL, GK_SKY };
-struct Group { uint64_t key; float M[12]; u32 first, count; int kind; float bias; };   // M: R row-major 3x3, then t
+struct Group { uint64_t key; float M[12]; u32 first, count; int kind; float bias; float sxy; };   // sxy: sky only, camera x/y scale   // M: R row-major 3x3, then t
 struct Capture {
     bool valid = false, drawn = false;
     u32 seq = 0;
@@ -110,6 +110,7 @@ static Group& group_begin(Capture& cap, uint64_t key, const float M[12], int kin
     g.key = key;
     g.kind = kind;
     g.bias = bias;
+    g.sxy = 1.0f;
     memcpy(g.M, M, sizeof g.M);
     g.first = (u32)cap.tris.size();
     g.count = 0;
@@ -319,7 +320,11 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
                 const LvVtx& lv = t.v[i];
                 float p[3] = {lv.x, lv.y, lv.z}, w[3], q[3];
                 if (lv.g < 0) view_of(cam, p, q);
-                else if (kind == GK_SKY) { xform(gm[lv.g].data(), p, w); for (int k = 0; k < 3; k++) q[k] = cam.R[k * 3] * w[0] + cam.R[k * 3 + 1] * w[1] + cam.R[k * 3 + 2] * w[2]; }
+                else if (kind == GK_SKY) {
+                    xform(gm[lv.g].data(), p, w);
+                    for (int k = 0; k < 3; k++) q[k] = cam.R[k * 3] * w[0] + cam.R[k * 3 + 1] * w[1] + cam.R[k * 3 + 2] * w[2];
+                    q[0] *= cap->groups[lv.g].sxy; q[1] *= cap->groups[lv.g].sxy;
+                }
                 else { xform(gm[lv.g].data(), p, w); view_of(cam, w, q); }
                 if (bias != 0.0f) for (int k = 0; k < 3; k++) q[k] *= 1.0f - bias;
                 o[i] = N3Vtx{q[0], q[1], q[2], lv.u, lv.v, lv.rgb};
@@ -755,4 +760,203 @@ static int ptmodel_do(Ctx* c) {
     }
     g_ram[(inst + 0xc) & 0x1FFFFF] |= 4;   // "drawn this frame", as the original does
     return 1;
+}
+
+// ---- sky dome, blob shadows, bullet marks (see re/notes_sky_shadow_decal.md) -----------------
+void mem_w32_slow(Ctx* c, u32 a, u32 v);
+
+// a material record (16 bytes): +0 flags (bit0 semi), +4 uv0, +6 CLUT, +8 uv1, +A TPAGE, +C uv2, +E uv3
+static N3Mat mat_record(u32 m, bool semi, float uv[4][2]) {
+    N3Mat o = {};
+    u16 clut = rd16(m + 6), tpage = rd16(m + 0xa);
+    o.textured = 1;
+    o.semi = semi;
+    o.blend = (tpage >> 5) & 3;
+    o.depth = (tpage >> 7) & 3;
+    if (o.depth > 2) o.depth = 2;
+    o.tpx = (tpage & 15) * 64;
+    o.tpy = ((tpage >> 4) & 1) * 256;
+    o.clutx = (clut & 63) * 16;
+    o.cluty = (clut >> 6) & 0x1ff;
+    static const int off[4] = {4, 8, 0xc, 0xe};
+    for (int i = 0; i < 4; i++) { u16 w = rd16(m + off[i]); uv[i][0] = (float)(w & 0xff); uv[i][1] = (float)(w >> 8); }
+    return o;
+}
+static void quad_tris(Capture& cap, const LvVtx L[4], const N3Mat& m) {   // PS1 corner order 0 1 / 2 3
+    cap.tris.push_back(LvTri{{L[0], L[1], L[2]}, m});
+    cap.tris.push_back(LvTri{{L[1], L[3], L[2]}, m});
+}
+
+// Hook body for 8005da74 (no arguments). The whole dome: a gradient of opaque quads between every
+// pair of rings, then the textured bands blended over it. Only the camera's rotation applies, and the
+// sky has its own projection distance (0x800f6d68): camera-space x, y are scaled by H_sky / H.
+bool sky3d_capture(Ctx* c) {
+    (void)c;
+    if (!scene3d_enabled() || !(g_n3_parts & 8)) return false;
+    if (!(rd16(0x800f6d6a) & 2)) return true;                   // sky off: the original draws nothing either
+    u32 geom = rd32(0x800f6d70), bands = rd32(0x800f6d74), mats = rd32(0x800f00cc);
+    if (!ptr_ok(geom) || rd32(geom) != 0x44594b53) return false;   // 'SKYD'
+    int nr = rds16(geom + 4), nc = rds16(geom + 6);
+    u32 verts = rd32(geom + 0xc);
+    if (!ptr_ok(verts) || nr < 2 || nr > 64 || nc != 32) return false;
+    Capture* cp = scene_cap();
+    if (!cp) return false;
+    Capture& cap = *cp;
+    float M[12] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, (float)rds16(0x800f6d64), 0};
+    Group& g = group_begin(cap, 0, M, GK_SKY);
+    float hs = (float)rd16(0x800f6d68);
+    g.sxy = cap.cam.h > 0.0f && hs > 0.0f ? hs / cap.cam.h : 1.0f;
+    int gi = (int)cap.groups.size() - 1;
+    auto vtx = [&](int r, int col, float u, float v, u32 rgb) {
+        u32 a = verts + 0x100u * r + 8u * (col & 31);
+        return LvVtx{(float)rds16(a), (float)rds16(a + 2), (float)rds16(a + 4), u, v, rgb, gi};
+    };
+    auto vcol = [&](int r, int col) {
+        u16 w = rd16(verts + 0x100u * r + 8u * (col & 31) + 6);
+        return (u32)((w & 31) << 3) | ((u32)((w >> 5) & 31) << 11) | ((u32)((w >> 10) & 31) << 19);
+    };
+    N3Mat flat = {};
+    for (int r = 0; r + 1 < nr; r++)
+        for (int i = 0; i < 32; i++) {
+            LvVtx L[4] = {vtx(r + 1, i, 0, 0, vcol(r + 1, i)), vtx(r + 1, i + 1, 0, 0, vcol(r + 1, i + 1)), vtx(r, i, 0, 0, vcol(r, i)), vtx(r, i + 1, 0, 0, vcol(r, i + 1))};
+            quad_tris(cap, L, flat);
+        }
+    int nb = rd16(0x800f6d6e);
+    if (ptr_ok(bands) && ptr_ok(mats) && nb > 0 && nb < 32) {
+        int step = 0x8000 / nb;
+        for (int b = 0; b < nb; b++) {
+            u32 br = bands + 0x44u * b;
+            int lo = rds16(br), hi = rds16(br + 2);
+            if (lo < 0 || hi >= nr || lo >= hi) continue;
+            u32 chi = (u32)(((b + 1) * step) >> 8), clo = (u32)((b * step) >> 8);
+            chi = chi > 255 ? 255 : chi;
+            chi *= 0x010101; clo *= 0x010101;
+            for (int i = 0; i < 32; i++) {
+                int mi = rds16(br + 4 + 2 * i);
+                if (mi < 0) continue;
+                u32 m = rd32(mats + 4u * mi);
+                if (!ptr_ok(m)) continue;
+                float uv[4][2];
+                N3Mat mm = mat_record(m, rd16(m) & 1, uv);
+                LvVtx L[4] = {vtx(hi, i, uv[0][0], uv[0][1], chi), vtx(hi, i + 1, uv[1][0], uv[1][1], chi), vtx(lo, i, uv[2][0], uv[2][1], clo), vtx(lo, i + 1, uv[3][0], uv[3][1], clo)};
+                quad_tris(cap, L, mm);
+            }
+        }
+    }
+    group_end(cap);
+    return true;
+}
+
+// Hook body for 8002dc88 (blob shadow of the object at *0x800efdc8). The original runs with the packet
+// pool marked full: it keeps its side effects (the shade clamp, the ground query) and emits nothing.
+// The one-quad mode is then built here; the ground-following 2x2 mode stays on the PS1 path.
+bool shadow3d_capture(Ctx* c, RecompFn orig) {
+    if (!scene3d_enabled() || !(g_n3_parts & 16)) return false;
+    u32 obj = rd32(0x800efdc8);
+    if (!ptr_ok(obj)) return false;
+    u32 o0c = rd32(obj + 0xc);
+    if (!ptr_ok(o0c) || (rd32(o0c + 0x18) & 0x100)) return false;
+    u32 sh = rd32(obj + 0x90), model = rd32(obj + 0x88);
+    if (!ptr_ok(sh) || !ptr_ok(model)) return false;
+    u32 coord = rd32(model + 0x24);
+    if (!ptr_ok(coord)) return false;
+    u32 lim = mem_r32_slow(c, 0x1f800070);
+    mem_w32_slow(c, 0x1f800070, mem_r32_slow(c, 0x1f80006c));
+    orig(c);
+    mem_w32_slow(c, 0x1f800070, lim);
+    // the ground under the object (queried again for moving objects, as the original does)
+    u32 gr = rd32(obj + 0x98), q = rd32(obj + 0x94);
+    if (ptr_ok(q) && rd32(q + 0x10) != 0) {
+        u32 save[32];
+        memcpy(save, c->r, sizeof save);
+        c->r[4] = coord + 0x44;
+        guest_call(c, 0x8002ea88);
+        gr = c->r[2];
+        memcpy(c->r, save, sizeof save);
+    }
+    if (!ptr_ok(gr) || rd32(gr + 0x18) == 0) return true;
+    float gy = (float)rds16(gr + 2), nx = rds16(gr + 0x10) / 4096.0f, nz = rds16(gr + 0x14) / 4096.0f;
+    float px = (float)(s32)rd32(coord + 0x44), pz = (float)(s32)rd32(coord + 0x4c);
+    s32 objy = (s32)rd32(obj + 0x2c), scale = rds16(obj + 0x34);
+    s32 sc;
+    if (objy < (s32)gy) {
+        s32 f = 0x100 - ((s32)gy - objy) * 0x100 / 0x2f8;
+        sc = (f < 0x80 ? 0x80 : f) * scale >> 12;
+    } else sc = scale >> 4;
+    float hx = (float)(s16)(rds16(sh) * sc >> 8), hz = (float)(s16)(rds16(sh + 2) * sc >> 8);
+    u32 tex = rd32(sh + 8);
+    if (!ptr_ok(tex) || hx == 0 || hz == 0) return true;
+    u32 grey = rd16(sh + 0xc) >> 8;
+    grey = (grey > 255 ? 255 : grey) * 0x010101;
+    // corners: G + Rx(asin(-nz)) * Rz(asin(nx)) * Ry(yaw) * (x, 0, z)
+    u32 o9c = rd32(obj + 0x9c);
+    float yaw = ptr_ok(o9c) ? rds16(o9c + 0x1a) * (6.28318531f / 4096.0f) : 0.0f;
+    float ax = asinf(fmaxf(-1.0f, fminf(1.0f, -nz))), az = asinf(fmaxf(-1.0f, fminf(1.0f, nx)));
+    float cx = cosf(ax), sx = sinf(ax), cz = cosf(az), sz = sinf(az), cy = cosf(yaw), sy = sinf(yaw);
+    float Rx[9] = {1, 0, 0, 0, cx, -sx, 0, sx, cx}, Rz[9] = {cz, -sz, 0, sz, cz, 0, 0, 0, 1}, Ry[9] = {cy, 0, sy, 0, 1, 0, -sy, 0, cy};
+    auto mul = [](const float* A, const float* B, float* O) {
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) O[i * 3 + j] = A[i * 3] * B[j] + A[i * 3 + 1] * B[3 + j] + A[i * 3 + 2] * B[6 + j];
+    };
+    float T[9], R[9];
+    mul(Rx, Rz, T);
+    mul(T, Ry, R);
+    float M[12];
+    memcpy(M, R, sizeof R);
+    M[9] = px; M[10] = gy; M[11] = pz;
+    Capture* cp = scene_cap();
+    if (!cp) return true;
+    Capture& cap = *cp;
+    group_begin(cap, (1ull << 62) | obj, M, GK_NORMAL, 0.004f);
+    int gi = (int)cap.groups.size() - 1;
+    float uv[4][2];
+    N3Mat m = mat_record(tex, true, uv);
+    const float cxz[4][2] = {{-hx, hz}, {hx, hz}, {-hx, -hz}, {hx, -hz}};
+    LvVtx L[4];
+    for (int i = 0; i < 4; i++) L[i] = LvVtx{cxz[i][0], 0.0f, cxz[i][1], uv[i][0], uv[i][1], grey, gi};
+    quad_tris(cap, L, m);
+    group_end(cap);
+    return true;
+}
+
+// Hook body for 8007e8c8 (bullet marks): the ring of 64 world-space squares at 0x800fc058.
+bool decals3d_capture(Ctx* c) {
+    (void)c;
+    if (!scene3d_enabled() || !(g_n3_parts & 16)) return false;
+    u32 world = rd32(0x800efea4), mats = rd32(0x800f00cc);
+    if (!ptr_ok(world) || !ptr_ok(mats)) return false;
+    u32 faces = rd32(world + 0x18);
+    if (!ptr_ok(faces)) return false;
+    faces += 0x10;
+    Capture* cp = scene_cap();
+    if (!cp) return false;
+    Capture& cap = *cp;
+    const Camera& cam = cap.cam;
+    group_begin(cap, 0, k_ident, GK_NORMAL, 0.006f);
+    int gi = (int)cap.groups.size() - 1;
+    int head = rd16(0x800fc054) & 63, tail = rd16(0x800fc056) & 63;
+    for (int i = head; i != tail; i = (i + 1) & 63) {
+        u32 e = 0x800fc058 + 0x18u * i;
+        int fi = rds16(e + 6);
+        if (fi < 0 || (rd32(faces + 16u * fi + 0xc) & 0xc10)) continue;
+        float P[4][3];
+        for (int k = 0; k < 3; k++) for (int j = 0; j < 3; j++) P[k][j] = (float)rds16(e + 8 * k + 2 * j);
+        for (int j = 0; j < 3; j++) P[3][j] = P[1][j] + P[2][j] - P[0][j];
+        // one-sided: seen from the side the bullet hit
+        float a[3], b[3], n[3], d[3];
+        for (int j = 0; j < 3; j++) { a[j] = P[1][j] - P[0][j]; b[j] = P[2][j] - P[0][j]; d[j] = cam.eye[j] - P[0][j]; }
+        n[0] = a[1] * b[2] - a[2] * b[1]; n[1] = a[2] * b[0] - a[0] * b[2]; n[2] = a[0] * b[1] - a[1] * b[0];
+        if (n[0] * d[0] + n[1] * d[1] + n[2] * d[2] <= 0) continue;
+        int life = rds16(e + 0xe);
+        u32 grey = (u32)(life < 0 ? 0 : life * 4 > 255 ? 255 : life * 4) * 0x010101;
+        int mi = rds16(0x800efb90 + 2 * (rd16(e + 0x16) & 1));
+        u32 m = mi >= 0 ? rd32(mats + 4u * mi) : 0;
+        if (!ptr_ok(m)) continue;
+        float uv[4][2];
+        N3Mat mm = mat_record(m, true, uv);
+        LvVtx L[4];
+        for (int k = 0; k < 4; k++) L[k] = LvVtx{P[k][0], P[k][1], P[k][2], uv[k][0], uv[k][1], grey, gi};
+        quad_tris(cap, L, mm);
+    }
+    group_end(cap);
+    return true;
 }

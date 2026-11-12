@@ -77,13 +77,13 @@ C = L2, Enter = Start, G = Select. XInput pads work at the same time (analog sti
 * Widescreen: HUD and menu elements are re-proportioned and anchored automatically (`hud_fix`); 2D effects drawn
   inside the 3D scene (not through the HUD layer) are still stretched.
 * Native 3D renderer (remastered view; `runtime/level3d.cpp` on the 3D path in `gpu3d.h`): the level geometry,
-  every object model (hero, enemies, weapons, doors, crates: per-part matrices, the game's lighting and fog) and
-  the effect meshes are read from the game's data and drawn as real 3D triangles with a depth buffer,
+  every object model (hero, enemies, weapons, doors, crates: per-part matrices, the game's lighting and fog),
+  the effect meshes, the sky dome, blob shadows and bullet marks are read from the game's data and drawn as real 3D triangles with a depth buffer,
   per-pixel perspective and near-plane clipping, instead of the game's screen-space projection, subdivision and
-  sort order. There is no PGXP: what still goes through the PS1 path (sky, shadows, decals, sprites, lines, HUD)
+  sort order. There is no PGXP: what still goes through the PS1 path (sprites, particles, lines, the HUD)
   is drawn as on the console and depth-tested against the native scene at the depth of its sort slot. Classic
   view uses the game's own renderer throughout. Options: `level3d=0` (off; also in the menu), `n3_parts` (debug
-  mask: 1 level, 2 effects, 4 objects), `n3_depth_ps1=0`.
+  mask: 1 level, 2 effects, 4 objects, 8 sky, 16 shadows and marks), `n3_depth_ps1=0`.
 * `texpage-*` and `vram-write-*` replacement images are not used (only `texupload-*`).
 * Mask-bit test (rarely used GPU feature) is not implemented in the D3D11 renderer.
 * Debug: `--headless --hw --frames N --shots DIR --every K --input script.txt` runs scripted tests.

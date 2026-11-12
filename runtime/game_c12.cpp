@@ -283,6 +283,12 @@ static void hook_level_draw(Ctx* c, RecompFn orig) {
 }
 bool meshfx_capture(Ctx* c, RecompFn orig);
 bool ptmodel_capture(Ctx* c);
+bool sky3d_capture(Ctx* c);
+bool shadow3d_capture(Ctx* c, RecompFn orig);
+bool decals3d_capture(Ctx* c);
+static void hook_sky_draw(Ctx* c, RecompFn orig) { if (!sky3d_capture(c)) orig(c); }
+static void hook_shadow_draw(Ctx* c, RecompFn orig) { if (!shadow3d_capture(c, orig)) orig(c); }
+static void hook_decals_draw(Ctx* c, RecompFn orig) { if (!decals3d_capture(c)) orig(c); }
 static void hook_ptmodel_draw(Ctx* c, RecompFn orig) {
     if (!ptmodel_capture(c)) orig(c);   // objects: drawn natively (level3d.cpp)
 }
@@ -493,6 +499,9 @@ void game_init() {
     hook_set(0x8006737c, hook_level_draw);
     hook_set(0x80086810, hook_meshfx_draw);
     hook_set(0x800b8cb4, hook_ptmodel_draw);
+    hook_set(0x8005da74, hook_sky_draw);
+    hook_set(0x8002dc88, hook_shadow_draw);
+    hook_set(0x8007e8c8, hook_decals_draw);
     hook_set(0x800a1128, hook_vsync_wait);
     g_main_fibre.live = true;
     g_cs = g_main_fibre.cs;
