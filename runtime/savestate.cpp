@@ -25,6 +25,7 @@ void ui_notify(const char* text);
 void plat_audio_reset();
 void gte_state_loaded();
 void mods_state_loaded();
+void level3d_reset();
 int mods_module_list(void** bases, int max);
 CoStack* game_main_stack();
 
@@ -149,6 +150,7 @@ static void do_load(const std::string& path) {
     if (r == 1) { ui_notify(why.c_str()); logf("load state %s: %s\n", path.c_str(), why.c_str()); return; }
     plat_audio_reset();
     gte_state_loaded();
+    level3d_reset();
     mods_state_loaded();
     char msg[64];
     snprintf(msg, sizeof msg, "state loaded (slot %d)", g_state_slot);

@@ -111,6 +111,35 @@ int g_ws_view = 0;   // experimental: expose squeezed view-space X to the game
 int g_pgxp_cull = 1; // winding test from precise coordinates
 int g_dbg_near = 0;  // experiment: never report a polygon as nearer than the game's near limit
 
+// ---- near geometry -------------------------------------------------------------------------------
+// A vertex closer than half the projection distance overflows the console's divide (FLAG bit 17) and
+// its screen position saturates (bits 13/14); games then drop the polygon. Seen from a low, wide
+// first-person eye that throws away the floor around the hero's feet. With near_keep the errors are
+// not reported for such vertices (in all functions, or only in the listed ones) so the game keeps the
+// polygon, and PGXP carries the vertex's true depth (negative = behind the eye) so the renderer can
+// clip the polygon exactly at the near plane.
+int g_near_keep = 1;          // 0 off, 1 all functions, 2 only g_near_keep_fn
+u32 g_near_keep_fn[16];
+int g_near_keep_n;
+int g_near_log = -1;          // debug: log near vertices per guest function at this frame
+extern "C" { extern u32* g_cs; extern int g_cs_n; }
+#include <map>
+static std::map<u32, int> g_near_count;
+static bool near_keep_here() {
+    if (g_near_keep == 1) return true;
+    if (g_near_keep != 2 || g_cs_n <= 0) return false;
+    u32 f = g_cs[(g_cs_n - 1) & 4095];
+    for (int i = 0; i < g_near_keep_n; i++) if (g_near_keep_fn[i] == f) return true;
+    return false;
+}
+void gte_near_frame(int frame) {   // called once per frame
+    if (g_near_log >= 0 && frame == g_near_log) {
+        for (auto& e : g_near_count) logf("near vertices: function %08x: %d\n", e.first, e.second);
+        logf("near vertices: %d functions\n", (int)g_near_count.size());
+    }
+    g_near_count.clear();
+}
+
 // PGXP vertex cache: precise result of every projection of the current frame, looked up by the
 // packed integer SXY word. Catches vertices that reach a primitive through code paths the
 // load/store tracking cannot follow (the game's own clipping / subdivision of near polygons).
@@ -245,14 +274,22 @@ static void rtp(Ctx* c, int v, int sh, int lm, bool last) {
     // PGXP
     {
         double fx = (double)m[0] / 4096.0, fy = (double)m[1] / 4096.0, fz = (double)m[2] / 4096.0;
-        double zc = fz < h * 0.5 ? h * 0.5 : fz;
-        if (zc < 1.0) zc = 1.0;
+        bool nearv = fz < h * 0.5;
+        // a near vertex keeps its true depth (negative = behind the eye) and the matching projective
+        // screen position: the renderer rebuilds clip-space coordinates (x*w, y*w, w) from them
+        double zc = fz;
+        if (!nearv && zc < 1.0) zc = 1.0;
+        if (nearv && fabs(zc) < 0.01) zc = zc < 0 ? -0.01 : 0.01;
         double pq = (double)h / zc;
         PgxpVal pv;
         pv.x = (float)(C[24] / 65536.0 + fx * pq * g_ws_scale);
         pv.y = (float)(C[25] / 65536.0 + fy * pq);
         pv.w = (float)zc;
-        pv.pad = fz < h * 0.5 ? 1 : 0;   // behind the near plane: the console's divide overflows, the position is garbage
+        pv.pad = nearv ? 1 : 0;   // nearer than the console can project: integer position saturated
+        if (nearv) {
+            if (g_near_log >= 0 && g_cs_n > 0) g_near_count[g_cs[(g_cs_n - 1) & 4095]]++;
+            if (near_keep_here()) FLAG &= ~((1u << 17) | (1u << 18) | (1u << 14) | (1u << 13));
+        }
         g_gte_h = (float)h;
         pv.val = (u32)D[14];
         mv_track(c->vsrc[v], pv);
@@ -324,6 +361,15 @@ void gte_op(Ctx* c, u32 op) {
             if (n < -2147483647.0) n = -2147483647.0;
             s32 pn = (s32)llrint(n);
             if (pn == 0 && n != 0.0) pn = n > 0 ? 1 : -1;
+            if (a.pad || b.pad || d.pad) {
+                // a vertex behind the eye flips its projected position: decide the facing in 3D, from
+                // the homogeneous coordinates (x*w, y*w, w) (sign of the triple product)
+                double ax = (double)a.x * a.w, ay = (double)a.y * a.w, aw = a.w;
+                double bx = (double)b.x * b.w, by = (double)b.y * b.w, bw = b.w;
+                double dx = (double)d.x * d.w, dy = (double)d.y * d.w, dw = d.w;
+                double det = ax * (by * dw - bw * dy) - ay * (bx * dw - bw * dx) + aw * (bx * dy - by * dx);
+                pn = det > 0 ? 0x10000 : det < 0 ? -0x10000 : 0;
+            }
             if ((pn > 0) != (MAC0 > 0) || (pn < 0) != (MAC0 < 0)) MAC0 = pn;
         }
         break;

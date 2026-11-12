@@ -41,6 +41,8 @@ extern float g_ws_scale;
 int g_ws_2d_fix = 1;
 
 int g_dbg_gpu = 0;
+extern int g_near_clip;
+void gte_near_frame(int frame);
 int g_dbg_frame = -1;      // dump every primitive of this frame to prims.txt
 static FILE* g_dbg_file;
 int g_ot_slots;
@@ -78,14 +80,15 @@ static GpuVtx make_vtx(u32 xy, u32 rgb, u32 uv, u32 addr) {
     v.has_old = 0;
     if (addr && (g_cfg.pgxp || g_ws_scale != 1.0f)) {
         const PgxpVal& p = g_pgxp_mem[(addr & (RAM_SIZE - 1)) >> 2];
-        if (p.val == xy && p.w > 0) {
-            // only trust it when it agrees with the integer coordinate (guards against stale/aliased entries)
+        if (p.val == xy && p.w != 0) {
+            // only trust it when it agrees with the integer coordinate (guards against stale/aliased
+            // entries); a near vertex's integer coordinate is saturated, it is known by its word alone
             float ix = (float)sext11(xy & 0x7FF), iy = (float)sext11((xy >> 16) & 0x7FF);
-            if (fabsf(p.x - ix) < 2.0f && fabsf(p.y - iy) < 2.0f) {
+            if ((p.pad && g_near_clip && g_cfg.persp) || (p.w > 0 && fabsf(p.x - ix) < 2.0f && fabsf(p.y - iy) < 2.0f)) {
                 v.px = p.x + g_off_x;
                 v.py = p.y + g_off_y;
                 v.pw = p.w;
-                if (p.has_old) { v.ox = p.ox + g_off_x; v.oy = p.oy + g_off_y; v.has_old = 1; }
+                if (p.has_old && !p.pad) { v.ox = p.ox + g_off_x; v.oy = p.oy + g_off_y; v.has_old = 1; }
             }
         }
     }
@@ -100,6 +103,7 @@ static GpuVtx make_vtx(u32 xy, u32 rgb, u32 uv, u32 addr) {
 int g_hud_fix = 1;
 float g_near_cull = 0.0f;
 int g_near_plane_cull = 1;
+int g_near_clip = 1;   // near polygons: clip at the near plane from PGXP's true depths (see gte.cpp)
 struct Box { int x0, y0, x1, y1; };
 struct Tf { float a, k, dy, dx; };
 static bool g_collect;                 // pass 1: record boxes, draw nothing
@@ -336,15 +340,15 @@ static void draw_polygon() {
     // positions exist (tracked or from the frame's vertex cache) so shared edges still line up,
     // and texture the primitive affinely.
     bool all = true;
-    for (int k = 0; k < n; k++) if (v[k].pw <= 0) all = false;
+    for (int k = 0; k < n; k++) if (v[k].pw == 0) all = false;   // pw: precise depth, 0 = none (negative = behind the eye)
     int pg_kind = all ? 1 : 0;   // 1 tracked, 2 completed from the cache, 3 partial, 0 none
     if (!all && (g_cfg.pgxp || g_ws_scale != 1.0f) && g_list_3d) {   // never for HUD/menu lists: their pixels only coincide with 3D vertices
         int got = 0;
         for (int k = 0; k < n; k++) {
             u32 xy = vxy[k];
             PgxpVal p;
-            if (v[k].pw > 0) { got++; continue; }
-            if (pgxp_cache_get(xy, &p)) {
+            if (v[k].pw != 0) { got++; continue; }
+            if (pgxp_cache_get(xy, &p) && !p.pad) {
                 float ix = (float)sext11(xy & 0x7FF), iy = (float)sext11((xy >> 16) & 0x7FF);
                 if (fabsf(p.x - ix) < 1.5f && fabsf(p.y - iy) < 1.5f) {
                     v[k].px = p.x + g_off_x; v[k].py = p.y + g_off_y; v[k].pw = p.w; got++;
@@ -366,7 +370,7 @@ static void draw_polygon() {
                 if (g_sub_n == 64) { memmove(g_sub, g_sub + 16, 48 * sizeof(SubV)); g_sub_n = 48; }
                 g_sub[g_sub_n++] = SubV{v[k].x, v[k].y, v[k].u, v[k].v, v[k].px, v[k].py, v[k].pw, v[k].ox, v[k].oy, v[k].has_old};
             };
-            for (int k = 0; k < n; k++) if (v[k].pw > 0) remember(k);   // this piece's own corners are parents too
+            for (int k = 0; k < n; k++) if (v[k].pw > 0) remember(k);   // this piece's own corners are parents too (not near ones)
             for (int pass = 0; pass < 2 && got < n; pass++)             // second pass: centre = midpoint of two midpoints
                 for (int k = 0; k < n; k++) {
                     if (v[k].pw > 0) continue;
@@ -406,14 +410,20 @@ static void draw_polygon() {
     // frame when leaving first-person view: the hero's own body, seen from inside his head.
     if (g_near_plane_cull && g_list_3d) {
         int behind = 0;
-        for (int k = 0; k < n; k++) { PgxpVal p; if (pgxp_cache_get(vxy[k], &p) && p.pad) behind++; }
+        if (all && g_near_clip && g_cfg.persp) { for (int k = 0; k < n; k++) if (v[k].pw < 0) behind++; }   // clipped anyway
+        else for (int k = 0; k < n; k++) { PgxpVal p; if (pgxp_cache_get(vxy[k], &p) && p.pad) behind++; }
         if (behind == n) return;
+    }
+    // a polygon that reaches behind the eye but has no precise depth on every vertex cannot be drawn
+    // correctly (its integer corners are saturated): leave it out rather than draw a stretched wedge
+    if (!all && g_near_clip && g_cfg.persp && g_list_3d) {
+        for (int k = 0; k < n; k++) { PgxpVal p; if (pgxp_cache_get(vxy[k], &p) && p.pad) return; }
     }
     // Near cull: geometry closer to the eye than this multiple of the projection distance is
     // dropped (the hero's own body when the camera travels through his head leaving aim mode).
     if (all && g_near_cull > 0.0f) {
         extern float g_gte_h;
-        for (int k = 0; k < n; k++) if (v[k].pw < g_gte_h * g_near_cull) return;
+        for (int k = 0; k < n; k++) if (v[k].pw > 0 && v[k].pw < g_gte_h * g_near_cull) return;
     }
     // In-between frame: every vertex that was tracked from the previous game frame goes halfway
     // back. Per vertex, not per polygon: shared vertices then move identically in all polygons that
@@ -721,6 +731,7 @@ void gpu_write_gp1(u32 v) {
 }
 
 // Walk one display list. Returns the number of ordering-table slots it contained.
+void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, int cx1, int cy1, int cx2, int cy2);
 static int walk_list(u32 madr, bool draw) {
     u32 a = madr & 0x1FFFFC;
     int guard = 0;
@@ -733,7 +744,11 @@ static int walk_list(u32 madr, bool draw) {
         u32 hdr;
         memcpy(&hdr, g_ram + a, 4);
         u32 n = hdr >> 24;
-        if (n == 0 && a <= ot_top && ot_top - a < 0x10000 && (a == ot_top || a + 4 == ot_last || a == ot_last)) { ot_last = a; ot_slots++; g_ot_index = (int)((ot_top - a) >> 2); }
+        if (n == 0 && a <= ot_top && ot_top - a < 0x10000 && (a == ot_top || a + 4 == ot_last || a == ot_last)) {
+            ot_last = a; ot_slots++; g_ot_index = (int)((ot_top - a) >> 2);
+            // the native level geometry goes in right after the farthest slot (the sky dome)
+            if (g_ot_index == 1 && draw && !g_collect) level3d_emit(a | 0x80000000u, g_noside, g_interp_pass, g_off_x, g_off_y, g_st.cx1, g_st.cy1, g_st.cx2, g_st.cy2);
+        }
         if (draw)
             for (u32 i = 1; i <= n; i++) {
                 u32 wa = (a + i * 4) & 0x1FFFFC, w;
@@ -885,6 +900,7 @@ void spu_frame();
 
 void gpu_vblank() {
     g_frame++;
+    gte_near_frame(g_frame);
     g_field ^= 1;
     { extern void mods_frame(); mods_frame(); }
     GpuDisplay d = cur_display();

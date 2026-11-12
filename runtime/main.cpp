@@ -43,6 +43,20 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k == "load_state") { extern std::string g_state_file; g_state_file = v; }
     else if (k == "state_file") { extern std::string g_state_file; g_state_file = v; }
     else if (k == "save_state_at") { extern int g_state_save_frame; g_state_save_frame = atoi(v.c_str()); }
+    else if (k == "level3d") { extern int g_level3d; g_level3d = atoi(v.c_str()); }
+    else if (k == "near_keep") { extern int g_near_keep; g_near_keep = atoi(v.c_str()); }
+    else if (k == "near_keep_fn") {   // comma separated guest function addresses (hex)
+        extern u32 g_near_keep_fn[16]; extern int g_near_keep_n;
+        g_near_keep_n = 0;
+        for (size_t p = 0; p < v.size() && g_near_keep_n < 16;) {
+            size_t q = v.find(',', p);
+            if (q == std::string::npos) q = v.size();
+            g_near_keep_fn[g_near_keep_n++] = strtoul(v.substr(p, q - p).c_str(), nullptr, 16) | 0x80000000u;
+            p = q + 1;
+        }
+    }
+    else if (k == "near_log") { extern int g_near_log; g_near_log = atoi(v.c_str()); }
+    else if (k == "near_clip") { extern int g_near_clip; g_near_clip = atoi(v.c_str()); }
     else if (k == "load_state_at") { extern int g_state_load_frame; g_state_load_frame = atoi(v.c_str()); }
     else if (k == "trace_fn") { extern u32 g_trace_fn; g_trace_fn = strtoul(v.c_str(), nullptr, 16); }
     else if (k == "dbg_skip") { extern int g_dbg_skip; g_dbg_skip = atoi(v.c_str()); }
@@ -56,6 +70,7 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k == "test_menu") { extern int g_test_menu; g_test_menu = atoi(v.c_str()); }
     else if (k == "dbg_gpu") { extern int g_dbg_gpu; g_dbg_gpu = atoi(v.c_str()); }
     else if (k == "dbg_frame") { extern int g_dbg_frame; g_dbg_frame = atoi(v.c_str()); }
+    else if (k.rfind("n3_", 0) == 0) { extern void n3_option(const char*, const char*); n3_option(k.c_str(), v.c_str()); }
     else if (k == "scale") I(g_cfg.scale);
     else if (k == "widescreen") I(g_cfg.widescreen);
     else if (k == "pgxp") I(g_cfg.pgxp);

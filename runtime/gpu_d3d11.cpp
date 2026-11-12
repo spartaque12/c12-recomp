@@ -7,6 +7,7 @@
 #include <dxgi1_5.h>
 #include <d3dcompiler.h>
 #include "gpu.h"
+#include "gpu3d.h"
 #include "hdtex.h"
 #include "ui.h"
 #include <algorithm>
@@ -48,8 +49,18 @@ static int bb_w, bb_h;
 #define MAXV 49152
 static Vtx verts[MAXV];
 static int nverts;
-enum { BK_OPAQUE, BK_DUAL, BK_SUB, BK_SUB_TEX };
+// batch kind = blend kind | depth mode << 3
+enum { BK_OPAQUE, BK_DUAL, BK_SUB, BK_SUB_TEX, BK_CUT /* opaque texels of a semi-transparent polygon only */ };
+enum { DM_OFF = 0, DM_TEST = 1 /* GREATER_EQUAL, no write */, DM_WRITE = 2 /* GREATER + write */ };
 static int cur_kind = -1;
+// native 3D path: one depth buffer per target (VRAM, in-between layer), reversed depth (0 = far)
+static ID3D11Texture2D* dtex[2];
+static ID3D11DepthStencilView* dsv[2];
+static ID3D11DepthStencilState* ds_state[3];
+static int depth_frame[2] = {-1000, -1000};   // g_frame (vblank count) at the last n3_begin on that target
+int g_n3_depth_ps1 = 1;
+float g_n3_ps1_bias = 0.01f;   // option n3_ps1_bias
+int g_n3_selftest = 0;
 char g_bb_shot[512];   // when set, the next present writes the back buffer here
 static void* cur_rep;   // replacement texture bound for the current batch
 ID3D11Device* hw_device() { return dev; }
@@ -75,11 +86,20 @@ Texture2D<float4> rep : register(t2);
 SamplerState smp : register(s0);
 struct VIn { float4 pos : POSITION; float4 col : COLOR0; float2 uv : TEXCOORD0; int4 tp : TEXCOORD1; int4 fl : TEXCOORD2; float4 lim : TEXCOORD3; };
 struct VOut { float4 pos : SV_Position; float4 col : COLOR0; float2 uv : TEXCOORD0; nointerpolation int4 tp : TEXCOORD1;
-              nointerpolation int4 fl : TEXCOORD2; nointerpolation float4 lim : TEXCOORD3; };
+              nointerpolation int4 fl : TEXCOORD2; nointerpolation float4 lim : TEXCOORD3; float2 clip : SV_ClipDistance0; };
 VOut vs_prim(VIn i) {
     VOut o;
-    float2 ndc = float2(i.pos.x / 512.0 - 1.0, 1.0 - i.pos.y / 256.0);
-    o.pos = float4(ndc * i.pos.w, 0.5 * i.pos.w, i.pos.w);
+    // PS1 primitives: pos.xy = VRAM pixel position, w = PGXP depth (1 = none); clip space (ndc*w, z, w).
+    // A polygon reaching behind the eye (w < 0 on a vertex) is cut at w = 0 instead of folding over.
+    // Native triangles (fl & 4096): pos.xy are already clip space, near/far planes in fl.zw (as floats).
+    // pos.z is the clip-space depth chosen by the CPU: N3_DEPTH_K, i.e. NDC depth K / w (reversed, infinite far).
+    float2 c = (i.fl.x & 4096) ? i.pos.xy : float2(i.pos.x / 512.0 - 1.0, 1.0 - i.pos.y / 256.0) * i.pos.w;
+    o.pos = float4(c, i.pos.z, i.pos.w);
+    o.clip = float2(1.0, 1.0);
+    if (i.fl.x & 4096) {
+        float zf = asfloat(i.fl.w);
+        o.clip = float2(i.pos.w - asfloat(i.fl.z), zf > 0.0 ? zf - i.pos.w : 1.0);
+    }
     o.col = i.col; o.uv = i.uv; o.tp = i.tp; o.fl = i.fl; o.lim = i.lim;
     return o;
 }
@@ -210,7 +230,8 @@ static void set_cb(int pass_mode, float a = 0, float b = 0, float c2 = 0, float 
 }
 
 static void set_vram_target(bool scissor) {
-    ctx->OMSetRenderTargets(1, (cur_target && i_rtv) ? &i_rtv : &vram_rtv, nullptr);
+    bool il = cur_target && i_rtv;
+    ctx->OMSetRenderTargets(1, il ? &i_rtv : &vram_rtv, dsv[il ? 1 : 0]);
     D3D11_VIEWPORT vp = {0, 0, 1024.0f * S, 512.0f * S, 0, 1};
     ctx->RSSetViewports(1, &vp);
     ctx->RSSetState(scissor ? rs_scissor : rs_plain);
@@ -246,8 +267,10 @@ static void flush() {
     ctx->PSSetSamplers(0, 1, &smp_linear);
     ctx->PSSetConstantBuffers(0, 1, &cbuf);
     float bf[4] = {1, 1, 1, 1};
-    switch (cur_kind) {
+    ctx->OMSetDepthStencilState(ds_state[std::clamp(cur_kind >> 3, 0, 2)], 0);
+    switch (cur_kind & 7) {
     case BK_OPAQUE: set_cb(0); ctx->OMSetBlendState(bs_opaque, bf, ~0u); ctx->Draw(nverts, 0); break;
+    case BK_CUT: set_cb(1); ctx->OMSetBlendState(bs_opaque, bf, ~0u); ctx->Draw(nverts, 0); break;
     case BK_DUAL: set_cb(0); ctx->OMSetBlendState(bs_dual, bf, ~0u); ctx->Draw(nverts, 0); break;
     case BK_SUB: set_cb(0); ctx->OMSetBlendState(bs_sub, bf, ~0u); ctx->Draw(nverts, 0); break;
     case BK_SUB_TEX:
@@ -308,7 +331,33 @@ static void fill_attr(Vtx& o, const GpuState& s, const float* lim) {
     memcpy(o.lim, lim, sizeof o.lim);
 }
 
+static bool depth_valid() {
+    int t = (cur_target && i_rtv) ? 1 : 0;
+    return dsv[t] && g_frame - depth_frame[t] <= 4;
+}
+static bool selftest_done[2];
+static void n3_selftest_draw(const GpuVtx* v, const GpuState& s);
+
 static void hw_tri(const GpuVtx* v, const GpuState& s) {
+    bool precise3 = v[0].pw != 0 && v[1].pw != 0 && v[2].pw != 0;
+    static int selftest_frame = -1;
+    if (selftest_frame != g_frame) { selftest_frame = g_frame; selftest_done[0] = selftest_done[1] = false; }
+    if (g_n3_selftest && precise3) {
+        static GpuVtx tv[3];
+        static GpuState ts;
+        static bool have_tex;
+        if (s.textured && !s.semi && (std::max({v[0].u, v[1].u, v[2].u}) - std::min({v[0].u, v[1].u, v[2].u})) >= 16) {
+            memcpy(tv, v, sizeof tv); ts = s; have_tex = true;   // texture for the next frame's test quad
+        }
+        if (!selftest_done[cur_target ? 1 : 0]) {
+            selftest_done[cur_target ? 1 : 0] = true;
+            if (have_tex) {
+                GpuState t = ts;
+                t.cx1 = s.cx1; t.cy1 = s.cy1; t.cx2 = s.cx2; t.cy2 = s.cy2;
+                n3_selftest_draw(tv, t);
+            } else n3_selftest_draw(v, s);
+        }
+    }
     int minx = std::min({v[0].x, v[1].x, v[2].x}), maxx = std::max({v[0].x, v[1].x, v[2].x});
     int miny = std::min({v[0].y, v[1].y, v[2].y}), maxy = std::max({v[0].y, v[1].y, v[2].y});
     // the console drops over-sized polygons; keep them when they are real 3D geometry (seen at the
@@ -325,14 +374,18 @@ static void hw_tri(const GpuVtx* v, const GpuState& s) {
     const HdSub* hd = s.textured ? hdtex_lookup(s, (int)lim[0], (int)lim[1], (int)lim[2], (int)lim[3]) : nullptr;
     if (hd) { lim[0] = (float)hd->u0; lim[1] = (float)hd->v0; lim[2] = 1.0f / hd->w; lim[3] = 1.0f / hd->h; }
     if (s.xs_k != 1.0f) { int a = (int)floorf(XS(s, (float)minx)), b = (int)ceilf(XS(s, (float)maxx)); minx = std::min(a, b); maxx = std::max(a, b); }
-    begin_prim(s, kind_of(s), 3, minx, miny, maxx + 1, maxy + 1, hd ? hd->srv : nullptr);
+    // 3D polygons (PGXP depth on every vertex) are hidden behind native geometry drawn this frame
+    int dm = (g_n3_depth_ps1 && precise3 && depth_valid()) ? DM_TEST : DM_OFF;
+    begin_prim(s, kind_of(s) | dm << 3, 3, minx, miny, maxx + 1, maxy + 1, hd ? hd->srv : nullptr);
     for (int i = 0; i < 3; i++) {
         Vtx& o = verts[nverts++];
-        bool precise = v[i].pw > 0;
+        bool precise = v[i].pw != 0;
         o.x = XS(s, v[i].px);
         o.y = v[i].py;
-        o.z = 0;
         o.w = (precise && g_cfg.persp) ? v[i].pw : 1.0f;
+        // NDC depth K / pw, the native mapping, pulled toward the eye by g_n3_ps1_bias: shadows and decals
+        // lie exactly on the (native) floor and walls, the game only moved them forward in its sort order
+        o.z = precise ? N3_DEPTH_K * o.w / (v[i].pw * (1.0f - g_n3_ps1_bias)) : 0.0f;
         u32 col = s.gouraud ? v[i].rgb : v[0].rgb;
         if (s.textured && s.raw) col = 0x808080;
         o.color = col | 0xFF000000u;
@@ -393,8 +446,183 @@ static void hw_line(const GpuVtx& a, const GpuVtx& b, const GpuState& s) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Native 3D path (gpu3d.h). Triangles in view space are turned into clip space on the CPU:
+//   clip = (((off_x + ofx) / 512 - 1) * z + x * h * ws / 512,  (1 - (off_y + ofy) / 256) * z - y * h / 256,  K,  z)
+// which divides to exactly the GTE projection on the 1024x512 VRAM viewport. They share the vertex
+// format, shader and batching with the PS1 polygons; fl & 4096 marks them for the vertex shader,
+// which then clips at znear / zfar with SV_ClipDistance (the rasterizer interpolates perspective-correctly).
+static N3View n3v;
+static bool n3_on;
+struct N3Queued { N3Vtx v[3]; N3Mat m; float z; };
+static std::vector<N3Queued> n3_semi;
+
+bool n3_available() { return dev != nullptr && vram_tex != nullptr; }
+
+void n3_invalidate() { depth_frame[0] = depth_frame[1] = -1000; }
+
+static GpuState n3_state(const N3Mat& m) {
+    GpuState s{};
+    s.textured = m.textured != 0; s.raw = m.raw != 0; s.semi = m.semi != 0; s.gouraud = true; s.dither = m.dither != 0;
+    s.blend = m.blend & 3; s.depth = std::clamp(m.depth, 0, 2);
+    s.tpx = m.tpx; s.tpy = m.tpy; s.clutx = m.clutx; s.cluty = m.cluty;
+    s.tw_mask_x = m.tw_mask_x; s.tw_mask_y = m.tw_mask_y; s.tw_off_x = m.tw_off_x; s.tw_off_y = m.tw_off_y;
+    s.cx1 = n3v.clip_x1; s.cy1 = n3v.clip_y1; s.cx2 = n3v.clip_x2; s.cy2 = n3v.clip_y2;
+    s.set_mask = m.set_mask != 0;
+    return s;
+}
+
+// kind: blend kind (BK_*), dm: depth mode (DM_*)
+static void n3_emit(const N3Vtx* v, const N3Mat& m, int kind, int dm) {
+    GpuState s = n3_state(m);
+    float lim[4] = {0, 0, 255, 255};
+    if (s.textured) {   // same texel limits as hw_tri (whole-texel UV rectangle of the polygon)
+        float fu0 = std::min({v[0].u, v[1].u, v[2].u}), fu1 = std::max({v[0].u, v[1].u, v[2].u});
+        float fv0 = std::min({v[0].v, v[1].v, v[2].v}), fv1 = std::max({v[0].v, v[1].v, v[2].v});
+        int u0 = std::clamp((int)floorf(fu0 + 0.001f), 0, 255), u1 = std::clamp((int)ceilf(fu1 - 0.001f), 0, 256);
+        int v0 = std::clamp((int)floorf(fv0 + 0.001f), 0, 255), v1 = std::clamp((int)ceilf(fv1 - 0.001f), 0, 256);
+        if (u1 > u0) u1--;
+        if (v1 > v0) v1--;
+        u1 = std::min(u1, 255); v1 = std::min(v1, 255);
+        lim[0] = (float)u0; lim[1] = (float)v0; lim[2] = (float)u1; lim[3] = (float)v1;
+    }
+    const HdSub* hd = s.textured ? hdtex_lookup(s, (int)lim[0], (int)lim[1], (int)lim[2], (int)lim[3]) : nullptr;
+    if (hd) { lim[0] = (float)hd->u0; lim[1] = (float)hd->v0; lim[2] = 1.0f / hd->w; lim[3] = 1.0f / hd->h; }
+    // the whole drawing area may change (the exact projected extent is unknown for near-clipped triangles)
+    begin_prim(s, kind | dm << 3, 3, n3v.clip_x1, n3v.clip_y1, n3v.clip_x2 + 1, n3v.clip_y2 + 1, hd ? hd->srv : nullptr);
+    float cx = (n3v.off_x + n3v.ofx) / 512.0f - 1.0f, cy = 1.0f - (n3v.off_y + n3v.ofy) / 256.0f;
+    float kx = n3v.h * n3v.ws_scale / 512.0f, ky = n3v.h / 256.0f;
+    s32 zn, zf;
+    float fzn = std::max(n3v.znear, 1e-3f), fzf = n3v.zfar;
+    memcpy(&zn, &fzn, 4); memcpy(&zf, &fzf, 4);
+    for (int i = 0; i < 3; i++) {
+        Vtx& o = verts[nverts++];
+        o.x = cx * v[i].z + v[i].x * kx;
+        o.y = cy * v[i].z - v[i].y * ky;
+        o.z = N3_DEPTH_K;
+        o.w = v[i].z;
+        u32 col = v[i].rgb & 0xFFFFFF;
+        if (s.textured && s.raw) col = 0x808080;
+        o.color = col | 0xFF000000u;
+        o.u = v[i].u;
+        o.v = v[i].v;
+        fill_attr(o, s, lim);
+        o.fl[0] |= 4096;
+        if (hd) o.fl[0] |= 512 | (hd->stp ? 1024 : 0);
+        o.fl[2] = zn; o.fl[3] = zf;
+    }
+}
+
+// Call while the target that should receive the 3D view is bound (VRAM, or the in-between layer
+// inside the front-end's interpolation replay). Clears that target's depth buffer to far; it then
+// stays valid for PS1 polygon depth tests until the next n3_begin on the target, n3_invalidate(),
+// or 4 presented frames without an n3_begin.
+void n3_begin(const N3View& v) {
+    if (!n3_available()) return;
+    flush();
+    cur_kind = -1;
+    n3v = v;
+    n3v.clip_x1 = std::clamp(n3v.clip_x1, 0, 1023); n3v.clip_x2 = std::clamp(n3v.clip_x2, 0, 1023);
+    n3v.clip_y1 = std::clamp(n3v.clip_y1, 0, 511); n3v.clip_y2 = std::clamp(n3v.clip_y2, 0, 511);
+    if (n3v.ws_scale == 0.0f) n3v.ws_scale = 1.0f;
+    int t = (cur_target && i_rtv) ? 1 : 0;
+    if (dsv[t]) ctx->ClearDepthStencilView(dsv[t], D3D11_CLEAR_DEPTH, 0.0f, 0);
+    depth_frame[t] = g_frame;
+    n3_semi.clear();
+    n3_on = true;
+}
+
+void n3_tri(const N3Vtx v[3], const N3Mat& m) {
+    if (!n3_on) return;
+    if (v[0].z <= n3v.znear && v[1].z <= n3v.znear && v[2].z <= n3v.znear) return;   // wholly behind the near plane
+    if (m.semi) {
+        N3Queued q;
+        memcpy(q.v, v, sizeof q.v);
+        q.m = m;
+        q.z = v[0].z + v[1].z + v[2].z;
+        n3_semi.push_back(q);
+        return;
+    }
+    n3_emit(v, m, BK_OPAQUE, DM_WRITE);
+}
+
+void n3_end() {
+    if (!n3_on) return;
+    if (!n3_semi.empty()) {
+        // 1) the opaque texels of semi-transparent textured triangles (no STP bit) are solid: draw and
+        //    depth-write them first, in any order
+        for (auto& q : n3_semi)
+            if (q.m.textured) n3_emit(q.v, q.m, BK_CUT, DM_WRITE);
+        // 2) everything semi-transparent, back to front by centroid depth, tested but not written
+        std::stable_sort(n3_semi.begin(), n3_semi.end(), [](const N3Queued& a, const N3Queued& b) { return a.z > b.z; });
+        for (auto& q : n3_semi) {
+            GpuState s = n3_state(q.m);
+            n3_emit(q.v, q.m, kind_of(s), DM_TEST);
+        }
+        n3_semi.clear();
+    }
+    flush();
+    cur_kind = -1;
+    n3_on = false;
+}
+
+void n3_option(const char* k, const char* v) {
+    if (!strcmp(k, "n3_depth_ps1")) g_n3_depth_ps1 = atoi(v);
+    if (!strcmp(k, "n3_ps1_bias")) g_n3_ps1_bias = (float)atof(v);
+    else if (!strcmp(k, "n3_selftest")) g_n3_selftest = atoi(v);
+}
+
+// Debug self-test (n3_selftest 1): before the first 3D polygon of each frame (per target), draw a
+// slowly turning textured quad (texture borrowed from that polygon) and a red semi-transparent quad in
+// front of it. The PS1 scene drawn afterwards is depth-tested against them, so walls nearer than the
+// quad cut through it and everything behind it is hidden.
+static void n3_selftest_draw(const GpuVtx* pv, const GpuState& ps) {
+    extern float g_gte_h;
+    extern float g_ws_scale;
+    N3View vw{};
+    vw.h = g_gte_h > 1.0f ? g_gte_h : 256.0f;
+    vw.clip_x1 = ps.cx1; vw.clip_y1 = ps.cy1; vw.clip_x2 = ps.cx2; vw.clip_y2 = ps.cy2;
+    vw.off_x = ps.cx1; vw.off_y = ps.cy1;
+    vw.ofx = (ps.cx2 - ps.cx1 + 1) * 0.5f; vw.ofy = (ps.cy2 - ps.cy1 + 1) * 0.5f;
+    vw.ws_scale = g_ws_scale;
+    vw.znear = 16.0f; vw.zfar = 0.0f;
+    n3_begin(vw);
+    float H = vw.h, a = g_frame * 0.02f, ca = cosf(a), sa = sinf(a);
+    if (g_frame % 300 == 1) logf("n3 selftest: H %.1f clip %d,%d..%d,%d tex %d tp %d,%d depth %d\n", H, ps.cx1, ps.cy1, ps.cx2, ps.cy2, (int)ps.textured, ps.tpx, ps.tpy, ps.depth);
+    N3Mat m{};
+    m.textured = ps.textured && g_n3_selftest == 1;   // 2 = untextured (gouraud colours only) m.depth = ps.depth; m.tpx = ps.tpx; m.tpy = ps.tpy; m.clutx = ps.clutx; m.cluty = ps.cluty;
+    m.tw_mask_x = ps.tw_mask_x; m.tw_mask_y = ps.tw_mask_y; m.tw_off_x = ps.tw_off_x; m.tw_off_y = ps.tw_off_y;
+    float u0 = (float)std::min({pv[0].u, pv[1].u, pv[2].u}), u1 = (float)std::max({pv[0].u, pv[1].u, pv[2].u});
+    float t0 = (float)std::min({pv[0].v, pv[1].v, pv[2].v}), t1 = (float)std::max({pv[0].v, pv[1].v, pv[2].v});
+    if (u1 - u0 < 8) { u0 = 0; u1 = 64; }
+    if (t1 - t0 < 8) { t0 = 0; t1 = 64; }
+    // quad of half size 0.8H centred at (0, 0, 2.5H), turning about the vertical axis
+    float hs = 0.8f * H, cz = 2.5f * H;
+    const float lx[4] = {-hs, hs, hs, -hs}, ly[4] = {-hs, -hs, hs, hs};
+    const float qu[4] = {u0, u1, u1, u0}, qv[4] = {t0, t0, t1, t1};
+    const u32 qc[4] = {0x808080, 0x80FF80, 0xFF8080, 0x8080FF};
+    N3Vtx q[4];
+    for (int i = 0; i < 4; i++) q[i] = N3Vtx{lx[i] * ca, ly[i], cz + lx[i] * sa, qu[i], qv[i], qc[i]};
+    N3Vtx t[3] = {q[0], q[1], q[2]};
+    n3_tri(t, m);
+    t[0] = q[0]; t[1] = q[2]; t[2] = q[3];
+    n3_tri(t, m);
+    // red semi-transparent (average) quad, partly in front of the textured one
+    N3Mat r{};
+    r.semi = 1; r.blend = 0;
+    float rx = 0.3f * H, rz = 1.2f * H, rs = 0.25f * H;
+    N3Vtx w[4] = {{rx - rs, -rs, rz, 0, 0, 0x0000FF}, {rx + rs, -rs, rz, 0, 0, 0x0000FF},
+                  {rx + rs, rs, rz, 0, 0, 0x0000C0}, {rx - rs, rs, rz, 0, 0, 0x0000C0}};
+    N3Vtx t2[3] = {w[0], w[1], w[2]};
+    n3_tri(t2, r);
+    t2[0] = w[0]; t2[1] = w[2]; t2[2] = w[3];
+    n3_tri(t2, r);
+    n3_end();
+}
+
 static void hw_fill(int x, int y, int w, int h, u32 rgb) {
     flush();
+    if (w >= 256 && h >= 192) selftest_done[cur_target ? 1 : 0] = false;   // frame buffer cleared: redraw the test quads
     // direct clear through a scissored draw (ignores drawing area and mask)
     GpuState s{};
     s.cx1 = x; s.cy1 = y; s.cx2 = std::min(x + w, 1024) - 1; s.cy2 = std::min(y + h, 512) - 1;
@@ -594,6 +822,20 @@ static void make_interp_layer() {
     ctx->ClearRenderTargetView(i_rtv, zero);
 }
 
+// depth buffers for the native 3D path, one per target, same size as the VRAM render target
+static void make_depth() {
+    for (int t = 0; t < 2; t++) {
+        rel(dsv[t]); rel(dtex[t]);
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = 1024 * S; td.Height = 512 * S; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_D32_FLOAT;
+        td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        if (FAILED(dev->CreateTexture2D(&td, nullptr, &dtex[t]))) { logf("native 3D: depth buffer %d not created\n", t); continue; }
+        dev->CreateDepthStencilView(dtex[t], nullptr, &dsv[t]);
+        ctx->ClearDepthStencilView(dsv[t], D3D11_CLEAR_DEPTH, 0.0f, 0);
+    }
+    n3_invalidate();
+}
+
 static void hw_target(int which) {
     if (which == cur_target) return;
     flush();
@@ -637,6 +879,7 @@ void hw_set_scale(int ns) {
     vram_tex = nt; vram_copy = nc; vram_rtv = nrtv; vram_srv = nsrv; copy_srv = ncsrv;
     S = ns;
     make_interp_layer();
+    make_depth();
     dirty[0] = 0; dirty[1] = 0; dirty[2] = 1024; dirty[3] = 512;
     dirty_any = true;
     cur_kind = -1;
@@ -743,8 +986,16 @@ bool hw_backend_init() {
     dev->CreateSamplerState(&sm, &smp_linear);
     sm.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
     dev->CreateSamplerState(&sm, &smp_point);
+    D3D11_DEPTH_STENCIL_DESC dd = {};
+    dd.DepthEnable = FALSE; dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO; dd.DepthFunc = D3D11_COMPARISON_ALWAYS;
+    dev->CreateDepthStencilState(&dd, &ds_state[DM_OFF]);
+    dd.DepthEnable = TRUE; dd.DepthFunc = D3D11_COMPARISON_GREATER_EQUAL;
+    dev->CreateDepthStencilState(&dd, &ds_state[DM_TEST]);
+    dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; dd.DepthFunc = D3D11_COMPARISON_GREATER;
+    dev->CreateDepthStencilState(&dd, &ds_state[DM_WRITE]);
     if (g_hwnd && swap) ui_init(g_hwnd, dev, ctx);
     make_interp_layer();
+    make_depth();
     hdtex_init(g_cfg.hd_textures);
     atexit(hdtex_stats);
     logf("d3d11 renderer: %dx internal resolution (%dx%d VRAM)%s\n", S, 1024 * S, 512 * S, tearing ? ", tearing allowed" : "");
