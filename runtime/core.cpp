@@ -9,9 +9,6 @@ u8 g_ram[RAM_SIZE + 16];
 static u32 g_cs_boot[4096];
 u32* g_cs = g_cs_boot;
 int g_cs_n;
-PgxpVal* g_pgxp_mem;
-PgxpVal g_pgxp_scratch[0x100];
-int g_pgxp_on = 1;
 extern const RecompFunc main_funcs[];
 extern const unsigned main_func_count;
 extern HookFn main_hooks[];
@@ -470,26 +467,26 @@ static inline void exec_simple(Ctx* c, u32 w, u32 pc) {
         break;
     case 18:
         if (rs & 0x10) gte_op(c, w & 0x1FFFFFF);
-        else if (rs == 0) { r[rt] = gte_mfc2(c, rd); pgxp_mfc2(c, rt, rd); }
+        else if (rs == 0) r[rt] = gte_mfc2(c, rd);
         else if (rs == 2) r[rt] = gte_cfc2(c, rd);
-        else if (rs == 4) { gte_mtc2(c, rd, r[rt]); pgxp_mtc2(c, rt, rd); }
+        else if (rs == 4) gte_mtc2(c, rd, r[rt]);
         else if (rs == 6) gte_ctc2(c, rd, r[rt]);
         else psx_invalid(c, pc, w);
         break;
     case 32: r[rt] = (u32)(s32)(s8)mem_r8(c, r[rs] + simm); break;
     case 33: r[rt] = (u32)(s32)(s16)mem_r16(c, r[rs] + simm); break;
     case 34: op_lwl(c, rt, r[rs] + simm); break;
-    case 35: { u32 a = r[rs] + simm; r[rt] = mem_r32(c, a); pgxp_lw(c, rt, a); break; }
+    case 35: { u32 a = r[rs] + simm; r[rt] = mem_r32(c, a); break; }
     case 36: r[rt] = mem_r8(c, r[rs] + simm); break;
     case 37: r[rt] = mem_r16(c, r[rs] + simm); break;
     case 38: op_lwr(c, rt, r[rs] + simm); break;
     case 40: mem_w8(c, r[rs] + simm, r[rt]); break;
     case 41: mem_w16(c, r[rs] + simm, r[rt]); break;
     case 42: op_swl(c, rt, r[rs] + simm); break;
-    case 43: { u32 a = r[rs] + simm; mem_w32(c, a, r[rt]); pgxp_sw(c, rt, a); break; }
+    case 43: { u32 a = r[rs] + simm; mem_w32(c, a, r[rt]); break; }
     case 46: op_swr(c, rt, r[rs] + simm); break;
-    case 50: { u32 a = r[rs] + simm; gte_mtc2(c, rt, mem_r32(c, a)); pgxp_lwc2(c, rt, a); break; }
-    case 58: { u32 a = r[rs] + simm; mem_w32(c, a, gte_mfc2(c, rt)); pgxp_swc2(c, rt, a); break; }
+    case 50: { u32 a = r[rs] + simm; gte_mtc2(c, rt, mem_r32(c, a)); break; }
+    case 58: { u32 a = r[rs] + simm; mem_w32(c, a, gte_mfc2(c, rt)); break; }
     default: psx_invalid(c, pc, w);
     }
     r[0] = 0;
@@ -575,7 +572,6 @@ void interp_run(Ctx* c, u32 pc, u32, u32) {
 
 // ---------------------------------------------------------------------
 void core_init() {
-    g_pgxp_mem = (PgxpVal*)calloc(RAM_SIZE / 4, sizeof(PgxpVal));
     for (unsigned i = 0; i < main_func_count; i++) {
         u32 o = main_funcs[i].addr - MAIN_BASE;
         if (o < 0xE0000u) g_fn_main[o >> 2] = main_funcs[i].fn;
@@ -649,8 +645,5 @@ void core_state(StateIO& s) {
         }
     }
     for (unsigned k = 0; k < g_overlay_desc_count; k++) s.pod(*g_overlay_descs[k].base);
-    if (s.load && s.ok) {
-        g_active = std::move(act);
-        memset(g_pgxp_mem, 0, (RAM_SIZE / 4) * sizeof(PgxpVal));   // precision data is rebuilt as the game runs
-    }
+    if (s.load && s.ok) g_active = std::move(act);
 }

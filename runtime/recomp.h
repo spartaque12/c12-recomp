@@ -18,15 +18,6 @@ typedef int64_t s64;
 
 #define RAM_SIZE 0x200000u
 
-/* PGXP shadow value: a precise screen-space vertex travelling with a 32-bit word */
-typedef struct PgxpVal {
-    float x, y, w;
-    u32 val;   /* the integer word this precision belongs to; mismatch = stale */
-    float ox, oy;  /* where the same model vertex was projected in the previous game frame */
-    u32 has_old;
-    u32 pad;
-} PgxpVal;
-
 typedef struct Ctx {
     u32 r[32];
     u32 hi, lo;
@@ -38,12 +29,6 @@ typedef struct Ctx {
     /* GTE */
     s32 gd[32];       /* data regs (raw storage) */
     s32 gc[32];       /* control regs */
-    /* PGXP */
-    PgxpVal preg[32]; /* per CPU register */
-    PgxpVal pgte[4];  /* SXY0..2 + spare */
-    /* frame interpolation: where each CPU register / GTE input vector was loaded from */
-    u32 rsrc[32], rsrc_val[32];
-    u32 vsrc[3];
 } Ctx;
 
 typedef void (*RecompFn)(Ctx*);
@@ -64,8 +49,6 @@ typedef struct OverlayDesc {
 } OverlayDesc;
 
 extern u8 g_ram[RAM_SIZE + 16];
-extern PgxpVal* g_pgxp_mem;  /* RAM_SIZE/4 entries */
-extern int g_pgxp_on;
 
 u32 mem_r8_slow(Ctx* c, u32 a);
 u32 mem_r16_slow(Ctx* c, u32 a);
@@ -159,30 +142,6 @@ static inline void op_divu(Ctx* c, u32 a, u32 b) {
     else { c->lo = a / b; c->hi = a % b; }
 }
 
-/* PGXP propagation: precision rides along with whole-word loads/stores. */
-extern PgxpVal g_pgxp_scratch[0x100];  /* scratchpad 1F800000..1F8003FF */
-static inline PgxpVal* pgxp_slot(u32 a) {
-    u32 p = PHYS(a);
-    if (p < RAM_SIZE) return &g_pgxp_mem[p >> 2];
-    if (p - 0x1F800000u < 0x400u) return &g_pgxp_scratch[(p >> 2) & 0xFF];
-    return 0;
-}
-static inline void pgxp_lw(Ctx* c, int rt, u32 a) {
-    PgxpVal* s = pgxp_slot(a);
-    if (s) c->preg[rt] = *s;
-    else c->preg[rt].val = ~c->r[rt];
-    c->rsrc[rt] = a;
-    c->rsrc_val[rt] = c->r[rt];
-}
-static inline void pgxp_sw(Ctx* c, int rt, u32 a) {
-    PgxpVal* s = pgxp_slot(a);
-    if (s) *s = c->preg[rt];
-}
-void pgxp_mfc2(Ctx* c, int rt, int reg);
-void pgxp_mtc2(Ctx* c, int rt, int reg);
-void pgxp_lwc2(Ctx* c, int reg, u32 a);
-void pgxp_swc2(Ctx* c, int reg, u32 a);
-
 extern u32* g_cs;
 extern int g_cs_n;
 #define CS_PUSH(a) (g_cs[g_cs_n++ & 4095] = (a))
@@ -200,18 +159,18 @@ extern int g_cs_n;
 #define LBU(rt, a) (R(rt) = mem_r8(c, (a)))
 #define LH(rt, a) (R(rt) = (u32)(s32)(s16)mem_r16(c, (a)))
 #define LHU(rt, a) (R(rt) = mem_r16(c, (a)))
-#define LW(rt, a) do { u32 a_ = (a); R(rt) = mem_r32(c, a_); pgxp_lw(c, rt, a_); } while (0)
+#define LW(rt, a) (R(rt) = mem_r32(c, (a)))
 #define SB(rt, a) mem_w8(c, (a), c->r[rt])
 #define SH(rt, a) mem_w16(c, (a), c->r[rt])
-#define SW(rt, a) do { u32 a_ = (a); mem_w32(c, a_, c->r[rt]); pgxp_sw(c, rt, a_); } while (0)
+#define SW(rt, a) mem_w32(c, (a), c->r[rt])
 #define LWL(rt, a) op_lwl(c, rt, (a))
 #define LWR(rt, a) op_lwr(c, rt, (a))
 #define SWL(rt, a) op_swl(c, rt, (a))
 #define SWR(rt, a) op_swr(c, rt, (a))
-#define MFC2(rt, rd) do { R(rt) = gte_mfc2(c, rd); pgxp_mfc2(c, rt, rd); } while (0)
-#define MTC2(rt, rd) do { gte_mtc2(c, rd, c->r[rt]); pgxp_mtc2(c, rt, rd); } while (0)
-#define LWC2(rt, a) do { u32 a_ = (a); gte_mtc2(c, rt, mem_r32(c, a_)); pgxp_lwc2(c, rt, a_); } while (0)
-#define SWC2(rt, a) do { u32 a_ = (a); mem_w32(c, a_, gte_mfc2(c, rt)); pgxp_swc2(c, rt, a_); } while (0)
+#define MFC2(rt, rd) (R(rt) = gte_mfc2(c, rd))
+#define MTC2(rt, rd) gte_mtc2(c, rd, c->r[rt])
+#define LWC2(rt, a) gte_mtc2(c, rt, mem_r32(c, (a)))
+#define SWC2(rt, a) do { u32 a_ = (a); mem_w32(c, a_, gte_mfc2(c, rt)); } while (0)
 
 #ifdef __cplusplus
 }

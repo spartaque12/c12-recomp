@@ -19,8 +19,6 @@ struct Config {
     std::string hd_textures;    // DuckStation-style replacement pack directory
     int scale = 4;              // internal resolution multiplier
     int widescreen = 1;         // 0 = 4:3, 1 = 16:9 (game hack)
-    int pgxp = 1;
-    int persp = 1;              // perspective-correct texturing
     int filter = 0;             // texture filtering
     int vsync = 1;
     int fullscreen = 0;

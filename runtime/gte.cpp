@@ -1,4 +1,4 @@
-// GTE (COP2) with PGXP precise-vertex side channel and widescreen projection scaling.
+// GTE (COP2) with widescreen projection scaling.
 #include "psx.h"
 #include <math.h>
 
@@ -108,125 +108,6 @@ int g_ws_flags = 1;  // saturation flags as in the original 4:3 projection
 float g_fov_mult = 1.0f;   // field-of-view multiplier set by mods (1 = the game's own)
 float g_gte_h = 1.0f;   // current projection distance
 int g_ws_view = 0;   // experimental: expose squeezed view-space X to the game
-int g_pgxp_cull = 1; // winding test from precise coordinates
-int g_dbg_near = 0;  // experiment: never report a polygon as nearer than the game's near limit
-
-// ---- near geometry -------------------------------------------------------------------------------
-// A vertex closer than half the projection distance overflows the console's divide (FLAG bit 17) and
-// its screen position saturates (bits 13/14); games then drop the polygon. Seen from a low, wide
-// first-person eye that throws away the floor around the hero's feet. With near_keep the errors are
-// not reported for such vertices (in all functions, or only in the listed ones) so the game keeps the
-// polygon, and PGXP carries the vertex's true depth (negative = behind the eye) so the renderer can
-// clip the polygon exactly at the near plane.
-int g_near_keep = 1;          // 0 off, 1 all functions, 2 only g_near_keep_fn
-u32 g_near_keep_fn[16];
-int g_near_keep_n;
-int g_near_log = -1;          // debug: log near vertices per guest function at this frame
-extern "C" { extern u32* g_cs; extern int g_cs_n; }
-#include <map>
-static std::map<u32, int> g_near_count;
-bool settings_is_classic();
-static bool near_keep_here() {
-    if (settings_is_classic()) return false;   // classic view: near polygons dropped as on the console
-    if (g_near_keep == 1) return true;
-    if (g_near_keep != 2 || g_cs_n <= 0) return false;
-    u32 f = g_cs[(g_cs_n - 1) & 4095];
-    for (int i = 0; i < g_near_keep_n; i++) if (g_near_keep_fn[i] == f) return true;
-    return false;
-}
-void gte_near_frame(int frame) {   // called once per frame
-    if (g_near_log >= 0 && frame == g_near_log) {
-        for (auto& e : g_near_count) logf("near vertices: function %08x: %d\n", e.first, e.second);
-        logf("near vertices: %d functions\n", (int)g_near_count.size());
-    }
-    g_near_count.clear();
-}
-
-// PGXP vertex cache: precise result of every projection of the current frame, looked up by the
-// packed integer SXY word. Catches vertices that reach a primitive through code paths the
-// load/store tracking cannot follow (the game's own clipping / subdivision of near polygons).
-#define VC_SIZE 65536
-#define VC_PROBE 8
-static PgxpVal g_vc[VC_SIZE];
-static u32 g_vc_gen[VC_SIZE];
-static u32 g_vc_cur = 1;
-static inline u32 vc_slot(u32 xy) { return (xy * 2654435761u) >> 16; }
-
-// ---- frame interpolation: previous-frame position of every projected model vertex --------------
-// A vertex is identified by the RAM address its model-space coordinates were loaded from plus the
-// n-th time that address is projected within the frame (instances of a shared mesh).
-#define MV_SIZE 131072
-#define MV_PROBE 8
-struct MvEnt { u64 key; float x, y; u32 gen; u32 cnt; };
-static MvEnt g_mv[2][MV_SIZE];
-static int g_mv_cur;                 // table being filled this frame; the other one is the previous frame
-static u32 g_mv_gen[2] = {1, 1};
-int g_mv_matched, g_mv_far;          // per-frame statistics (camera-cut detection)
-int g_mv_prev_matched, g_mv_prev_far;
-static inline u32 mv_hash(u64 k) { return (u32)((k * 0x9E3779B97F4A7C15ull) >> 47); }
-static MvEnt* mv_find(int t, u64 key, bool create) {
-    u32 h = mv_hash(key);
-    for (int i = 0; i < MV_PROBE; i++) {
-        MvEnt& e = g_mv[t][(h + i) & (MV_SIZE - 1)];
-        if (e.gen != g_mv_gen[t]) {
-            if (!create) return nullptr;
-            e.gen = g_mv_gen[t]; e.key = key; e.cnt = 0;
-            return &e;
-        }
-        if (e.key == key) return &e;
-    }
-    return nullptr;
-}
-void pgxp_cache_next_frame() {
-    g_vc_cur++;
-    g_mv_prev_matched = g_mv_matched;
-    g_mv_prev_far = g_mv_far;
-    g_mv_matched = g_mv_far = 0;
-    g_mv_cur ^= 1;
-    g_mv_gen[g_mv_cur]++;            // empties the table that now becomes "current"
-}
-// after a save state was loaded: nothing of the previous frames belongs to the new picture
-void gte_state_loaded() {
-    g_mv_gen[0]++;
-    g_mv_gen[1]++;
-    g_vc_cur++;
-}
-// record this projection and return last frame's position of the same vertex
-static void mv_track(u32 src, PgxpVal& pv) {
-    pv.has_old = 0;
-    if (!src) return;
-    MvEnt* cnt = mv_find(g_mv_cur, (u64)src, true);          // occurrence counter lives under key (src, -)
-    if (!cnt) return;
-    u64 key = ((u64)(++cnt->cnt) << 32) | src;
-    MvEnt* e = mv_find(g_mv_cur, key, true);
-    if (e) { e->x = pv.x; e->y = pv.y; }
-    MvEnt* o = mv_find(g_mv_cur ^ 1, key, false);
-    if (!o) return;
-    pv.ox = o->x;
-    pv.oy = o->y;
-    pv.has_old = 1;
-    g_mv_matched++;
-    if (fabsf(pv.x - o->x) > 160.0f || fabsf(pv.y - o->y) > 160.0f) g_mv_far++;
-}
-static void vc_put(const PgxpVal& pv) {
-    u32 h = vc_slot(pv.val);
-    for (int i = 0; i < VC_PROBE; i++) {
-        u32 s = (h + i) & (VC_SIZE - 1);
-        if (g_vc_gen[s] != g_vc_cur || g_vc[s].val == pv.val) { g_vc[s] = pv; g_vc_gen[s] = g_vc_cur; return; }
-    }
-    g_vc[h] = pv;
-    g_vc_gen[h] = g_vc_cur;
-}
-bool pgxp_cache_get(u32 xy, PgxpVal* out) {
-    u32 h = vc_slot(xy);
-    for (int i = 0; i < VC_PROBE; i++) {
-        u32 s = (h + i) & (VC_SIZE - 1);
-        if (g_vc_gen[s] != g_vc_cur) return false;
-        if (g_vc[s].val == xy) { *out = g_vc[s]; return true; }
-    }
-    return false;
-}  // horizontal projection scale (0.75 for 16:9)
-
 static void rtp(Ctx* c, int v, int sh, int lm, bool last) {
     s32 vx = VX(v), vy = VY(v), vz = VZ(v);
     s64 m[3];
@@ -273,33 +154,7 @@ static void rtp(Ctx* c, int v, int sh, int lm, bool last) {
     D[12] = D[13];
     D[13] = D[14];
     D[14] = (s32)(((u32)isy << 16) | ((u32)isx & 0xFFFF));
-    // PGXP
-    {
-        double fx = (double)m[0] / 4096.0, fy = (double)m[1] / 4096.0, fz = (double)m[2] / 4096.0;
-        bool nearv = fz < h * 0.5;
-        // a near vertex keeps its true depth (negative = behind the eye) and the matching projective
-        // screen position: the renderer rebuilds clip-space coordinates (x*w, y*w, w) from them
-        double zc = fz;
-        if (!nearv && zc < 1.0) zc = 1.0;
-        if (nearv && fabs(zc) < 0.01) zc = zc < 0 ? -0.01 : 0.01;
-        double pq = (double)h / zc;
-        PgxpVal pv;
-        pv.x = (float)(C[24] / 65536.0 + fx * pq * g_ws_scale);
-        pv.y = (float)(C[25] / 65536.0 + fy * pq);
-        pv.w = (float)zc;
-        pv.pad = nearv ? 1 : 0;   // nearer than the console can project: integer position saturated
-        if (nearv) {
-            if (g_near_log >= 0 && g_cs_n > 0) g_near_count[g_cs[(g_cs_n - 1) & 4095]]++;
-            if (near_keep_here()) FLAG &= ~((1u << 17) | (1u << 18) | (1u << 14) | (1u << 13));
-        }
-        g_gte_h = (float)h;
-        pv.val = (u32)D[14];
-        mv_track(c->vsrc[v], pv);
-        c->pgte[0] = c->pgte[1];
-        c->pgte[1] = c->pgte[2];
-        c->pgte[2] = pv;
-        vc_put(pv);
-    }
+    g_gte_h = (float)h;
     if (last) {
         s64 d = chkF(c, (s64)C[28] + (s64)C[27] * q);
         MAC0 = (s32)d;
@@ -353,27 +208,6 @@ void gte_op(Ctx* c, u32 op) {
     case 0x06: {
         s32 x0 = (s16)D[12], y0 = (s16)(D[12] >> 16), x1 = (s16)D[13], y1 = (s16)(D[13] >> 16), x2 = (s16)D[14], y2 = (s16)(D[14] >> 16);
         MAC0 = (s32)chkF(c, (s64)x0 * y1 + (s64)x1 * y2 + (s64)x2 * y0 - (s64)x0 * y2 - (s64)x1 * y0 - (s64)x2 * y1);
-        // Precise winding test: the integer screen coordinates saturate at +-1024 for vertices far
-        // off-screen (near the camera at wide angles), which can flip the sign and make the game
-        // drop a visible polygon. Decide from the unsaturated precise coordinates instead.
-        if (g_pgxp_cull && c->pgte[0].val == (u32)D[12] && c->pgte[1].val == (u32)D[13] && c->pgte[2].val == (u32)D[14]) {
-            const PgxpVal &a = c->pgte[0], &b = c->pgte[1], &d = c->pgte[2];
-            double n = (double)a.x * b.y + (double)b.x * d.y + (double)d.x * a.y - (double)a.x * d.y - (double)b.x * a.y - (double)d.x * b.y;
-            if (n > 2147483647.0) n = 2147483647.0;
-            if (n < -2147483647.0) n = -2147483647.0;
-            s32 pn = (s32)llrint(n);
-            if (pn == 0 && n != 0.0) pn = n > 0 ? 1 : -1;
-            if (a.pad || b.pad || d.pad) {
-                // a vertex behind the eye flips its projected position: decide the facing in 3D, from
-                // the homogeneous coordinates (x*w, y*w, w) (sign of the triple product)
-                double ax = (double)a.x * a.w, ay = (double)a.y * a.w, aw = a.w;
-                double bx = (double)b.x * b.w, by = (double)b.y * b.w, bw = b.w;
-                double dx = (double)d.x * d.w, dy = (double)d.y * d.w, dw = d.w;
-                double det = ax * (by * dw - bw * dy) - ay * (bx * dw - bw * dx) + aw * (bx * dy - by * dx);
-                pn = det > 0 ? 0x10000 : det < 0 ? -0x10000 : 0;
-            }
-            if ((pn > 0) != (MAC0 > 0) || (pn < 0) != (MAC0 < 0)) MAC0 = pn;
-        }
         break;
     }
     case 0x0C: {
@@ -477,13 +311,13 @@ void gte_op(Ctx* c, u32 op) {
     case 0x2D: {
         s64 t = chkF(c, (s64)(s16)C[29] * ((u32)(u16)D[17] + (u16)D[18] + (u16)D[19]));
         MAC0 = (s32)t;
-        D[7] = lmD(c, (s32)(t >> 12)); if (g_dbg_near && D[7] < 4) D[7] = 4;
+        D[7] = lmD(c, (s32)(t >> 12)); 
         break;
     }
     case 0x2E: {
         s64 t = chkF(c, (s64)(s16)C[30] * ((u32)(u16)D[16] + (u16)D[17] + (u16)D[18] + (u16)D[19]));
         MAC0 = (s32)t;
-        D[7] = lmD(c, (s32)(t >> 12)); if (g_dbg_near && D[7] < 4) D[7] = 4;
+        D[7] = lmD(c, (s32)(t >> 12)); 
         break;
     }
     case 0x3D:
@@ -565,30 +399,4 @@ void gte_ctc2(Ctx* c, int reg, u32 v) {
         if (v & 0x7F87E000) v |= 0x80000000;
     }
     C[reg] = (s32)v;
-}
-
-// ---- PGXP register plumbing -------------------------------------------
-extern "C" {
-void pgxp_mfc2(Ctx* c, int rt, int reg) {
-    if (reg >= 12 && reg <= 15) c->preg[rt] = c->pgte[reg == 15 ? 2 : reg - 12];
-    else c->preg[rt].val = ~c->r[rt];
-}
-void pgxp_mtc2(Ctx* c, int rt, int reg) {
-    if (reg == 0 || reg == 2 || reg == 4) c->vsrc[reg >> 1] = c->rsrc_val[rt] == c->r[rt] ? c->rsrc[rt] : 0;
-    if (reg >= 12 && reg <= 14) c->pgte[reg - 12] = c->preg[rt];
-    else if (reg == 15) { c->pgte[0] = c->pgte[1]; c->pgte[1] = c->pgte[2]; c->pgte[2] = c->preg[rt]; }
-}
-void pgxp_lwc2(Ctx* c, int reg, u32 a) {
-    if (reg == 0 || reg == 2 || reg == 4) c->vsrc[reg >> 1] = a;
-    PgxpVal* s = pgxp_slot(a);
-    if (!s) return;
-    if (reg >= 12 && reg <= 14) c->pgte[reg - 12] = *s;
-    else if (reg == 15) { c->pgte[0] = c->pgte[1]; c->pgte[1] = c->pgte[2]; c->pgte[2] = *s; }
-}
-void pgxp_swc2(Ctx* c, int reg, u32 a) {
-    PgxpVal* s = pgxp_slot(a);
-    if (!s) return;
-    if (reg >= 12 && reg <= 15) *s = c->pgte[reg == 15 ? 2 : reg - 12];
-    else s->val = ~(u32)D[reg];
-}
 }

@@ -10,8 +10,8 @@
 //   n3_tri(...) x N;          // opaque triangles draw at once (depth test + write),
 //                             // semi-transparent ones are queued
 //   n3_end();                 // queued semi-transparent triangles, back to front (depth test, no write)
-//   ... the PS1 display list is drawn afterwards: its 3D polygons (PGXP depth on all vertices) are
-//   depth-tested against the native geometry when g_n3_depth_ps1 is set; 2D primitives never are.
+//   ... the PS1 display list is drawn afterwards: the primitives of the world list are depth-tested
+//   against the native geometry at the depth of their sort slot when g_n3_depth_ps1 is set.
 // Call the same sequence again after the front-end has switched to the in-between frame layer
 // (GpuBackend::target(1)) to draw the interpolated frame; each target has its own depth buffer.
 //
@@ -66,9 +66,9 @@ void n3_invalidate();                         // forget the depth buffers (PS1 p
 
 // Depth: reversed, infinite-far mapping. NDC depth = N3_DEPTH_K / z (1 at z = N3_DEPTH_K, 0 at infinity),
 // depth buffer cleared to 0, tests are GREATER (native opaque, writes) and GREATER_EQUAL (native
-// semi-transparent and PS1 3D polygons, no write). PS1 polygons use z = PGXP w for the same mapping.
+// semi-transparent and PS1 world primitives, no write). PS1 primitives use their sort slot's depth.
 #define N3_DEPTH_K 1.0f
 
-extern int g_n3_depth_ps1;   // 1 (default): PS1 3D polygons are depth-tested against native geometry
+extern int g_n3_depth_ps1;   // 1 (default): PS1 world primitives are depth-tested against native geometry
 extern int g_n3_selftest;    // debug: draw a test quad pair with n3_* before each frame's 3D polygons
 void n3_option(const char* key, const char* value);   // "n3_depth_ps1", "n3_selftest"

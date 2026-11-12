@@ -6,7 +6,7 @@ struct GpuVtx {
     s32 x, y;          // integer screen coords, drawing offset applied
     u32 rgb;           // 0x00BBGGRR
     s32 u, v;
-    float px, py, pw;  // precise coords (offset applied); pw <= 0 means "no PGXP data"
+    float px, py, pw;  // position as drawn (offset and widescreen layout applied); pw unused (0)
     float ox, oy;      // position of the same vertex in the previous game frame (front-end only)
     int has_old;
 };

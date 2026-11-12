@@ -442,11 +442,6 @@ void cdrom_dma(u32 madr, u32 bcr, u32 chcr) {
         u8 b = g_fifo_pos < g_fifo_len ? g_fifo[g_fifo_pos++] : 0;
         g_ram[(a + i) & (RAM_SIZE - 1)] = b;
     }
-    for (u32 i = 0; i < words; i++) {
-        u32 wa = (a + i * 4) & (RAM_SIZE - 4), w;
-        memcpy(&w, g_ram + wa, 4);
-        g_pgxp_mem[wa >> 2].val = ~w;
-    }
 }
 
 bool cdrom_init(const std::string& cue) {

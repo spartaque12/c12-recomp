@@ -47,14 +47,13 @@ void settings_defaults() {
 
 void settings_apply() {
     g_ws_scale = g_cfg.widescreen ? 0.75f : 1.0f;
-    g_pgxp_on = g_cfg.pgxp;
     core_set_bias(g_cfg.cpu_bias);
     hw_set_scale(g_cfg.scale);
 }
 
 // The presentation-only part of the configuration: what the classic/remastered key swaps.
 static void copy_look(Config& d, const Config& s) {
-    d.scale = s.scale; d.widescreen = s.widescreen; d.pgxp = s.pgxp; d.persp = s.persp; d.filter = s.filter;
+    d.scale = s.scale; d.widescreen = s.widescreen; d.filter = s.filter;
     d.hd_enabled = s.hd_enabled; d.present_linear = s.present_linear; d.audio_interp = s.audio_interp; d.interp = s.interp;
 }
 
@@ -62,7 +61,7 @@ void settings_toggle_classic() {
     if (!g_classic) {
         g_saved = g_cfg;
         Config c = g_cfg;
-        c.scale = 1; c.widescreen = 0; c.pgxp = 0; c.persp = 0; c.filter = 0; c.hd_enabled = 0; c.present_linear = 0; c.audio_interp = 2; c.interp = 0;
+        c.scale = 1; c.widescreen = 0; c.filter = 0; c.hd_enabled = 0; c.present_linear = 0; c.audio_interp = 2; c.interp = 0;
         copy_look(g_cfg, c);
     } else copy_look(g_cfg, g_saved);
     g_classic = !g_classic;
@@ -81,8 +80,6 @@ void settings_save(const char* path) {
     fprintf(f, "widescreen=%d       # 16:9 field of view\n", c.widescreen);
     fprintf(f, "hud_fix=%d          # keep HUD/menus in proportion in widescreen\n", g_hud_fix);
     { extern int g_level3d; fprintf(f, "level3d=%d          # native 3D renderer for the level (depth buffer)\n", g_level3d); }
-    fprintf(f, "pgxp=%d             # sub-pixel vertex precision\n", c.pgxp);
-    fprintf(f, "perspective=%d      # perspective-correct texturing\n", c.persp);
     fprintf(f, "filter=%d           # bilinear filtering of original textures\n", c.filter);
     fprintf(f, "hd_enabled=%d       # use the HD texture pack\n", c.hd_enabled);
     fprintf(f, "hd_textures=%s\n", c.hd_textures.c_str());
@@ -188,8 +185,6 @@ static void draw_menu() {
             b = g_hud_fix; if (ImGui::Checkbox("Keep HUD and menus in proportion", &b)) g_hud_fix = b;
             { extern int g_level3d; b = g_level3d; if (ImGui::Checkbox("Native 3D renderer (real depth buffer, no wobble)", &b)) g_level3d = b; }
             ImGui::SameLine(); ImGui::TextDisabled("(level, characters, objects, effects; remastered only)");
-            b = g_cfg.pgxp; if (ImGui::Checkbox("PGXP sub-pixel precision (no wobble, no seams)", &b)) { g_cfg.pgxp = b; changed = true; }
-            b = g_cfg.persp; if (ImGui::Checkbox("Perspective-correct texturing", &b)) g_cfg.persp = b;
             b = g_cfg.hd_enabled; if (ImGui::Checkbox("HD texture pack", &b)) g_cfg.hd_enabled = b;
             if (!g_hd_on) { ImGui::SameLine(); ImGui::TextDisabled("(no pack found in '%s')", g_cfg.hd_textures.c_str()); }
             b = g_cfg.filter; if (ImGui::Checkbox("Bilinear filtering of original textures", &b)) g_cfg.filter = b;

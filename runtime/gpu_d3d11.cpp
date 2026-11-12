@@ -1,5 +1,5 @@
 // Direct3D 11 renderer: VRAM kept on the GPU at N x resolution in RGBA8 (true colour, A = mask bit),
-// PGXP sub-pixel vertex positions, perspective-correct texturing, dual-source semi-transparency.
+// native 3D triangles with a depth buffer (gpu3d.h), dual-source semi-transparency.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -60,7 +60,6 @@ static ID3D11DepthStencilState* ds_state[3];
 static int depth_frame[2] = {-1000, -1000};   // g_frame (vblank count) at the last n3_begin on that target
 int g_n3_depth_ps1 = 1;
 float g_prim_depth;   // > 0: view depth of a flat (2D) primitive of the world list, from its sort slot
-float g_n3_ps1_bias = 0.01f;   // option n3_ps1_bias
 int g_n3_selftest = 0;
 char g_bb_shot[512];   // when set, the next present writes the back buffer here
 static void* cur_rep;   // replacement texture bound for the current batch
@@ -90,7 +89,7 @@ struct VOut { float4 pos : SV_Position; float4 col : COLOR0; float2 uv : TEXCOOR
               nointerpolation int4 fl : TEXCOORD2; nointerpolation float4 lim : TEXCOORD3; float2 clip : SV_ClipDistance0; };
 VOut vs_prim(VIn i) {
     VOut o;
-    // PS1 primitives: pos.xy = VRAM pixel position, w = PGXP depth (1 = none); clip space (ndc*w, z, w).
+    // PS1 primitives: pos.xy = VRAM pixel position, w = 1; clip space (ndc*w, z, w).
     // A polygon reaching behind the eye (w < 0 on a vertex) is cut at w = 0 instead of folding over.
     // Native triangles (fl & 4096): pos.xy are already clip space, near/far planes in fl.zw (as floats).
     // pos.z is the clip-space depth chosen by the CPU: N3_DEPTH_K, i.e. NDC depth K / w (reversed, infinite far).
@@ -315,7 +314,6 @@ static void begin_prim(const GpuState& s, int kind, int need, int bx1, int by1, 
     add_dirty(std::max(bx1, cx1), std::max(by1, cy1), std::min(bx2, cx2 + 1), std::min(by2, cy2 + 1));
 }
 
-int g_big_polys = 1;
 static inline float XS(const GpuState& s, float x) { return s.xs_k == 1.0f ? x : s.xs_a + (x - s.xs_a) * s.xs_k; }
 
 static int kind_of(const GpuState& s) {
@@ -340,10 +338,9 @@ static bool selftest_done[2];
 static void n3_selftest_draw(const GpuVtx* v, const GpuState& s);
 
 static void hw_tri(const GpuVtx* v, const GpuState& s) {
-    bool precise3 = v[0].pw != 0 && v[1].pw != 0 && v[2].pw != 0;
     static int selftest_frame = -1;
     if (selftest_frame != g_frame) { selftest_frame = g_frame; selftest_done[0] = selftest_done[1] = false; }
-    if (g_n3_selftest && precise3) {
+    if (g_n3_selftest && g_prim_depth > 0.0f) {
         static GpuVtx tv[3];
         static GpuState ts;
         static bool have_tex;
@@ -361,9 +358,7 @@ static void hw_tri(const GpuVtx* v, const GpuState& s) {
     }
     int minx = std::min({v[0].x, v[1].x, v[2].x}), maxx = std::max({v[0].x, v[1].x, v[2].x});
     int miny = std::min({v[0].y, v[1].y, v[2].y}), maxy = std::max({v[0].y, v[1].y, v[2].y});
-    // the console drops over-sized polygons; keep them when they are real 3D geometry (seen at the
-    // edges of the wider view, where near polygons get huge)
-    if ((maxx - minx > 1023 || maxy - miny > 511) && !g_big_polys) return;
+    if (maxx - minx > 1023 || maxy - miny > 511) return;   // the console drops over-sized polygons
     float lim[4] = {0, 0, 255, 255};
     if (s.textured) {
         int u0 = std::min({v[0].u, v[1].u, v[2].u}), u1 = std::max({v[0].u, v[1].u, v[2].u});
@@ -375,20 +370,16 @@ static void hw_tri(const GpuVtx* v, const GpuState& s) {
     const HdSub* hd = s.textured ? hdtex_lookup(s, (int)lim[0], (int)lim[1], (int)lim[2], (int)lim[3]) : nullptr;
     if (hd) { lim[0] = (float)hd->u0; lim[1] = (float)hd->v0; lim[2] = 1.0f / hd->w; lim[3] = 1.0f / hd->h; }
     if (s.xs_k != 1.0f) { int a = (int)floorf(XS(s, (float)minx)), b = (int)ceilf(XS(s, (float)maxx)); minx = std::min(a, b); maxx = std::max(a, b); }
-    // 3D polygons (PGXP depth on every vertex) are hidden behind native geometry drawn this frame
-    // so are flat primitives of the world list (sprites, glows), at the depth of their sort slot
-    bool slotd = !precise3 && g_prim_depth > 0.0f;
-    int dm = (g_n3_depth_ps1 && (precise3 || slotd) && depth_valid()) ? DM_TEST : DM_OFF;
+    // primitives of the world list are hidden behind native geometry drawn this frame, at the depth of
+    // their sort slot
+    int dm = (g_n3_depth_ps1 && g_prim_depth > 0.0f && depth_valid()) ? DM_TEST : DM_OFF;
     begin_prim(s, kind_of(s) | dm << 3, 3, minx, miny, maxx + 1, maxy + 1, hd ? hd->srv : nullptr);
     for (int i = 0; i < 3; i++) {
         Vtx& o = verts[nverts++];
-        bool precise = v[i].pw != 0;
         o.x = XS(s, v[i].px);
         o.y = v[i].py;
-        o.w = (precise && g_cfg.persp) ? v[i].pw : 1.0f;
-        // NDC depth K / pw, the native mapping, pulled toward the eye by g_n3_ps1_bias: shadows and decals
-        // lie exactly on the (native) floor and walls, the game only moved them forward in its sort order
-        o.z = precise ? N3_DEPTH_K * o.w / (v[i].pw * (1.0f - g_n3_ps1_bias)) : slotd ? N3_DEPTH_K / g_prim_depth : 0.0f;
+        o.w = 1.0f;
+        o.z = dm ? N3_DEPTH_K / g_prim_depth : 0.0f;   // the native depth mapping, K / z
         u32 col = s.gouraud ? v[i].rgb : v[0].rgb;
         if (s.textured && s.raw) col = 0x808080;
         o.color = col | 0xFF000000u;
@@ -397,7 +388,6 @@ static void hw_tri(const GpuVtx* v, const GpuState& s) {
         fill_attr(o, s, lim);
         if (hd) o.fl[0] |= 512 | (hd->stp ? 1024 : 0);
     }
-    // perspective needs all three w's from the same primitive; mixed precise/imprecise is prevented by the front-end
 }
 
 static void quad(float x1, float y1, float x2, float y2, float u1, float v1, float u2, float v2, u32 rgb, const GpuState& s, const float* lim) {
@@ -574,7 +564,6 @@ void n3_end() {
 
 void n3_option(const char* k, const char* v) {
     if (!strcmp(k, "n3_depth_ps1")) g_n3_depth_ps1 = atoi(v);
-    if (!strcmp(k, "n3_ps1_bias")) g_n3_ps1_bias = (float)atof(v);
     else if (!strcmp(k, "n3_selftest")) g_n3_selftest = atoi(v);
 }
 

@@ -159,7 +159,6 @@ static void dma_start(int ch) {
             u32 next = (a - 4) & 0x1FFFFC;
             u32 v = n ? next : 0xFFFFFF;
             memcpy(g_ram + a, &v, 4);
-            g_pgxp_mem[a >> 2].val = ~v;
             a = next;
         }
         ev = EV_DMA_OTC;

@@ -41,8 +41,6 @@ extern float g_ws_scale;
 int g_ws_2d_fix = 1;
 
 int g_dbg_gpu = 0;
-extern int g_near_clip;
-void gte_near_frame(int frame);
 int g_dbg_frame = -1;      // dump every primitive of this frame to prims.txt
 static FILE* g_dbg_file;
 int g_ot_slots;
@@ -63,10 +61,8 @@ static void set_clut(u32 v) {
     g_st.cluty = (v >> 6) & 0x1FF;
 }
 
-bool pgxp_cache_get(u32 xy, PgxpVal* out);
-void pgxp_cache_next_frame();
 
-static GpuVtx make_vtx(u32 xy, u32 rgb, u32 uv, u32 addr) {
+static GpuVtx make_vtx(u32 xy, u32 rgb, u32 uv) {
     GpuVtx v;
     v.x = sext11(xy & 0x7FF) + g_off_x;
     v.y = sext11((xy >> 16) & 0x7FF) + g_off_y;
@@ -76,22 +72,6 @@ static GpuVtx make_vtx(u32 xy, u32 rgb, u32 uv, u32 addr) {
     v.px = (float)v.x;
     v.py = (float)v.y;
     v.pw = 0;
-    v.ox = v.oy = 0;
-    v.has_old = 0;
-    if (addr && (g_cfg.pgxp || g_ws_scale != 1.0f)) {
-        const PgxpVal& p = g_pgxp_mem[(addr & (RAM_SIZE - 1)) >> 2];
-        if (p.val == xy && p.w != 0) {
-            // only trust it when it agrees with the integer coordinate (guards against stale/aliased
-            // entries); a near vertex's integer coordinate is saturated, it is known by its word alone
-            float ix = (float)sext11(xy & 0x7FF), iy = (float)sext11((xy >> 16) & 0x7FF);
-            if ((p.pad && g_near_clip && g_cfg.persp) || (p.w > 0 && fabsf(p.x - ix) < 2.0f && fabsf(p.y - iy) < 2.0f)) {
-                v.px = p.x + g_off_x;
-                v.py = p.y + g_off_y;
-                v.pw = p.w;
-                if (p.has_old && !p.pad) { v.ox = p.ox + g_off_x; v.oy = p.oy + g_off_y; v.has_old = 1; }
-            }
-        }
-    }
     return v;
 }
 
@@ -101,9 +81,6 @@ static GpuVtx make_vtx(u32 xy, u32 rgb, u32 uv, u32 addr) {
 // squeezed back to its real proportions around a sensible anchor: left edge, right edge or centre.
 // Anything spanning the full width (fades, letterbox bars, tiled backgrounds) stays stretched.
 int g_hud_fix = 1;
-float g_near_cull = 0.0f;
-int g_near_plane_cull = 1;
-int g_near_clip = 1;   // near polygons: clip at the near plane from PGXP's true depths (see gte.cpp)
 struct Box { int x0, y0, x1, y1; };
 struct Tf { float a, k, dy, dx; };
 static bool g_collect;                 // pass 1: record boxes, draw nothing
@@ -113,7 +90,7 @@ static size_t g_tf_i;
 static bool g_tf_on;
 static int g_clip_l, g_clip_r;
 static bool g_collect_3d;              // the list being examined contains real 3D polygons
-static int g_last_pgxp_frame = -100;   // last frame that drew real 3D geometry
+static int g_last_3d_frame = -100;     // last frame that drew 3D geometry (native scene or world polygons)
 
 static std::vector<u8> g_box3d;        // per collected primitive: it is projected 3D geometry, leave it alone
 static bool g_world_layout;            // the list being laid out is the world list (3D plus maybe a 2D panel)
@@ -295,37 +272,32 @@ static void layout_2d(float k) {
             logf("  2D group %d..%d x %d..%d -> anchor %.0f k %.2f (clip %d..%d)\n", gb[i].x0, gb[i].x1, gb[i].y0, gb[i].y1, gt[i].a, gt[i].k, L, R);
 }
 
-// recently resolved vertices of screen-space-subdivided polygons (parents for midpoint reconstruction)
-struct SubV { int x, y, u, v; float px, py, w, ox, oy; int has_old; };
-static SubV g_sub[64];
-static int g_sub_n;
-static bool g_interp_pass;  // drawing the in-between frame: vertices go halfway back to last frame
+static bool g_interp_pass;  // drawing the in-between frame (native geometry goes halfway back to last frame)
 static bool g_noside;       // suppress uploads/copies/read-backs (list is being replayed)
 static bool g_in_list;
-static bool g_list_had_3d;  // the list being replayed contained tracked 3D polygons
+static bool g_list_had_3d;  // the list being drawn contained 3D geometry
 static bool g_list_3d;     // the display list being drawn is the world (large ordering table)
 
 // View depth of the ordering-table slot being drawn (world list only; 0 = none). The game sorts with
-// slot = z >> 3; the front-most slots hold 2D overlays (scope frame), which get none.
+// slot = z >> 3; the front-most slots hold 2D overlays (scope frame), which get none. A little nearer
+// than the slot: a flat shadow lying on a native floor must not sink into it.
 extern float g_prim_depth;
 static float slot_depth() {
     int game_slot = g_ot_slots_cur - 1 - g_ot_index;
-    return (g_list_3d && g_ot_slots_cur >= 1024 && game_slot >= 8) ? (float)(game_slot * 8) : 0.0f;
+    return (g_list_3d && g_ot_slots_cur >= 1024 && game_slot >= 8) ? (float)(game_slot * 8) * 0.97f : 0.0f;
 }
 
+bool scene3d_enabled();
 static void draw_polygon() {
     u32 cmd = g_fifo[0] >> 24;
     bool gouraud = cmd & 0x10, quad = cmd & 0x08, tex = cmd & 0x04;
     int n = quad ? 4 : 3;
     GpuVtx v[4];
-    u32 vxy[4];
     int i = 0;
     u32 color = g_fifo[0];
     for (int k = 0; k < n; k++) {
         if (gouraud && k > 0) color = g_fifo[i++]; else if (k == 0) i++;
         u32 xy = g_fifo[i];
-        vxy[k] = xy;
-        u32 addr = g_fifo_addr[i];
         i++;
         u32 uv = 0;
         if (tex) {
@@ -337,146 +309,41 @@ static void draw_polygon() {
                 if (g_tex_disable_allowed) g_stat = (g_stat & ~0x8000u) | ((tp & 0x800) << 4);
             }
         }
-        v[k] = make_vtx(xy, color, uv, addr);
+        v[k] = make_vtx(xy, color, uv);
     }
     g_st.textured = tex;
     g_st.raw = tex && (cmd & 1);
     g_st.semi = cmd & 2;
     g_st.gouraud = gouraud;
     g_st.dither = (g_stat & 0x200) && (gouraud || (tex && !g_st.raw));
-    // PGXP: perspective needs tracked data on every vertex. Otherwise keep whatever precise
-    // positions exist (tracked or from the frame's vertex cache) so shared edges still line up,
-    // and texture the primitive affinely.
-    bool all = true;
-    for (int k = 0; k < n; k++) if (v[k].pw == 0) all = false;   // pw: precise depth, 0 = none (negative = behind the eye)
-    int pg_kind = all ? 1 : 0;   // 1 tracked, 2 completed from the cache, 3 partial, 0 none
-    if (!all && (g_cfg.pgxp || g_ws_scale != 1.0f) && g_list_3d) {   // never for HUD/menu lists: their pixels only coincide with 3D vertices
-        int got = 0;
-        for (int k = 0; k < n; k++) {
-            u32 xy = vxy[k];
-            PgxpVal p;
-            if (v[k].pw != 0) { got++; continue; }
-            if (pgxp_cache_get(xy, &p) && !p.pad) {
-                float ix = (float)sext11(xy & 0x7FF), iy = (float)sext11((xy >> 16) & 0x7FF);
-                if (fabsf(p.x - ix) < 1.5f && fabsf(p.y - iy) < 1.5f) {
-                    v[k].px = p.x + g_off_x; v[k].py = p.y + g_off_y; v[k].pw = p.w; got++;
-                    if (p.has_old) { v[k].ox = p.ox + g_off_x; v[k].oy = p.oy + g_off_y; v[k].has_old = 1; }
-                }
-            }
-        }
-        // The game splits near polygons in screen space (2D midpoints of edges, averaged UVs),
-        // which is affine by construction. Rebuild each midpoint as the projection of the true 3D
-        // midpoint of its two parents: position weighted by depth, depth averaged. The pieces then
-        // render exactly like the unsplit, perspective-correct polygon.
-        // Not for flat-drawn 2D shapes that merely lie in the world list (the map's scroll arrows):
-        // untextured and without a single projected vertex, their corners would be "rebuilt" from
-        // whatever 3D edge happens to pass under them and be dragged along it.
-        if (got < n && (tex || got > 0)) {
-            auto remember = [&](int k) {
-                for (int a = 0; a < g_sub_n; a++)
-                    if (g_sub[a].x == v[k].x && g_sub[a].y == v[k].y && g_sub[a].u == v[k].u && g_sub[a].v == v[k].v) return;
-                if (g_sub_n == 64) { memmove(g_sub, g_sub + 16, 48 * sizeof(SubV)); g_sub_n = 48; }
-                g_sub[g_sub_n++] = SubV{v[k].x, v[k].y, v[k].u, v[k].v, v[k].px, v[k].py, v[k].pw, v[k].ox, v[k].oy, v[k].has_old};
-            };
-            for (int k = 0; k < n; k++) if (v[k].pw > 0) remember(k);   // this piece's own corners are parents too (not near ones)
-            for (int pass = 0; pass < 2 && got < n; pass++)             // second pass: centre = midpoint of two midpoints
-                for (int k = 0; k < n; k++) {
-                    if (v[k].pw > 0) continue;
-                    for (int a = 0; a < g_sub_n && v[k].pw <= 0; a++)
-                        for (int b = a + 1; b < g_sub_n; b++) {
-                            const SubV &A = g_sub[a], &B = g_sub[b];
-                            if (tex && (abs(((A.u + B.u) >> 1) - v[k].u) > 1 || abs(((A.v + B.v) >> 1) - v[k].v) > 1)) continue;
-                            // The piece's new vertex must sit on the parent edge A-B, roughly in the middle
-                            // (the game places it with its own, coarser maths). It is replaced by the exact
-                            // projection of the 3D midpoint, which lies on the same edge, so the mesh stays closed.
-                            float ex = B.px - A.px, ey = B.py - A.py, el = ex * ex + ey * ey;
-                            if (el < 4.0f) continue;
-                            float t = ((v[k].px - A.px) * ex + (v[k].py - A.py) * ey) / el;
-                            float dist = fabsf((v[k].px - A.px) * ey - (v[k].py - A.py) * ex) / sqrtf(el);
-                            if (t < 0.25f || t > 0.75f || dist > 2.0f) continue;
-                            float ws = A.w + B.w;
-                            float mx = (A.px * A.w + B.px * B.w) / ws, my = (A.py * A.w + B.py * B.w) / ws;
-                            v[k].px = mx;
-                            v[k].py = my;
-                            v[k].pw = ws * 0.5f;
-                            v[k].has_old = A.has_old && B.has_old;
-                            if (v[k].has_old) { v[k].ox = (A.ox * A.w + B.ox * B.w) / ws; v[k].oy = (A.oy * A.w + B.oy * B.w) / ws; }
-                            got++;
-                            remember(k);
-                            break;
-                        }
-                }
-        }
-        // every vertex has a depth now: perspective-correct. Otherwise keep the precise positions
-        // (shared edges still line up) and texture affinely.
-        if (got == n) { all = true; pg_kind = 2; }
-        else { pg_kind = got ? 3 : 0; for (int k = 0; k < n; k++) v[k].pw = 0; }
-    } else if (!all) for (int k = 0; k < n; k++) { v[k].px = (float)v[k].x; v[k].py = (float)v[k].y; v[k].pw = 0; }
-    if (all) { g_last_pgxp_frame = g_frame; g_list_had_3d = true; g_collect_3d = true; }
-    // A world polygon whose every vertex lies behind the near plane has no valid projection (the
-    // console's divide overflows and the coordinates saturate). The game sends such polygons for one
-    // frame when leaving first-person view: the hero's own body, seen from inside his head.
-    if (g_near_plane_cull && g_list_3d) {
-        int behind = 0;
-        if (all && g_near_clip && g_cfg.persp) { for (int k = 0; k < n; k++) if (v[k].pw < 0) behind++; }   // clipped anyway
-        else for (int k = 0; k < n; k++) { PgxpVal p; if (pgxp_cache_get(vxy[k], &p) && p.pad) behind++; }
-        if (behind == n) return;
-    }
-    // a polygon that reaches behind the eye but has no precise depth on every vertex cannot be drawn
-    // correctly (its integer corners are saturated): leave it out rather than draw a stretched wedge
-    if (!all && g_near_clip && g_cfg.persp && g_list_3d) {
-        for (int k = 0; k < n; k++) { PgxpVal p; if (pgxp_cache_get(vxy[k], &p) && p.pad) return; }
-    }
-    // Near cull: geometry closer to the eye than this multiple of the projection distance is
-    // dropped (the hero's own body when the camera travels through his head leaving aim mode).
-    if (all && g_near_cull > 0.0f) {
-        extern float g_gte_h;
-        for (int k = 0; k < n; k++) if (v[k].pw > 0 && v[k].pw < g_gte_h * g_near_cull) return;
-    }
-    // In-between frame: every vertex that was tracked from the previous game frame goes halfway
-    // back. Per vertex, not per polygon: shared vertices then move identically in all polygons that
-    // use them, so no cracks open between moved and unmoved neighbours.
-    if (g_interp_pass) {
-        for (int k = 0; k < n; k++)
-            if (v[k].has_old && fabsf(v[k].px - v[k].ox) < 256.0f && fabsf(v[k].py - v[k].oy) < 200.0f) {
-                v[k].px = (v[k].px + v[k].ox) * 0.5f;
-                v[k].py = (v[k].py + v[k].oy) * 0.5f;
-            }
-    }
-    if (!g_cfg.pgxp) {   // PGXP off: whole-pixel positions and affine texturing, as on the console
-        for (int k = 0; k < n; k++) { v[k].px = floorf(v[k].px + 0.5f); v[k].py = floorf(v[k].py + 0.5f); v[k].pw = 0; }
-    }
+    // a polygon of the world scene (the front-most slots of the world list may hold a 2D panel)
+    bool scene = g_list_3d && g_ot_index < g_ot_slots_cur - 8;
+    if (scene && !scene3d_enabled()) { g_last_3d_frame = g_frame; g_list_had_3d = true; g_collect_3d = true; }
     {
         int x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
         for (int k = 1; k < n; k++) { x0 = std::min(x0, v[k].x); x1 = std::max(x1, v[k].x); y0 = std::min(y0, v[k].y); y1 = std::max(y1, v[k].y); }
-        // in the world list only the front-most slots can hold a 2D panel; everything behind is the scene
-        if (prim_2d(x0, y0, x1, y1, pg_kind != 0 ? 1 : (g_list_3d && g_ot_index < g_ot_slots_cur - 8) ? 2 : 0)) return;
+        if (prim_2d(x0, y0, x1, y1, scene ? 2 : 0)) return;
         if (g_st.ys != 0.0f || g_st.xs_dx != 0.0f)
             for (int k = 0; k < n; k++) { v[k].y += (int)g_st.ys; v[k].py += g_st.ys; v[k].x += (int)g_st.xs_dx; v[k].px += g_st.xs_dx; }
     }
     if (g_dbg_file) {
-        fprintf(g_dbg_file, "poly %02x ot %d pgxp %d tp %d,%d semi %d:", cmd, g_ot_index, pg_kind, g_st.tpx, g_st.tpy, (int)g_st.semi);
-        for (int k = 0; k < n; k++) fprintf(g_dbg_file, " (%d,%d|%.2f,%.2f|%.0f|uv %d,%d|%06x)", v[k].x, v[k].y, v[k].px, v[k].py, v[k].pw, v[k].u, v[k].v, v[k].rgb);
-        if (pg_kind == 3) {
-            fprintf(g_dbg_file, "  W:");
-            for (int k = 0; k < n; k++) { PgxpVal p; if (pgxp_cache_get(vxy[k], &p)) fprintf(g_dbg_file, " %.1f", p.w); else fprintf(g_dbg_file, " ?"); }
-        }
+        fprintf(g_dbg_file, "poly %02x ot %d tp %d,%d semi %d:", cmd, g_ot_index, g_st.tpx, g_st.tpy, (int)g_st.semi);
+        for (int k = 0; k < n; k++) fprintf(g_dbg_file, " (%d,%d|uv %d,%d|%06x)", v[k].x, v[k].y, v[k].u, v[k].v, v[k].rgb);
         fputc(10, g_dbg_file);
     }
     // The console silently drops triangles larger than 1023x511. Games rely on that (this one sends
-    // over-sized helper polygons with its scope effect), so only tracked 3D geometry is exempt.
+    // over-sized helper polygons with its scope effect).
     auto oversize = [](const GpuVtx* t) {
         int x0 = std::min({t[0].x, t[1].x, t[2].x}), x1 = std::max({t[0].x, t[1].x, t[2].x});
         int y0 = std::min({t[0].y, t[1].y, t[2].y}), y1 = std::max({t[0].y, t[1].y, t[2].y});
         return x1 - x0 > 1023 || y1 - y0 > 511;
     };
-    bool keep_big = pg_kind == 1 || pg_kind == 2;
-    // A flat primitive among the world's polygons (a sprite, a glow, a screen-built effect quad) has no
-    // depth of its own. On the console the sort order hid it behind nearer geometry; with native
-    // geometry drawn first it would show through walls and characters: test it at its slot's depth.
-    g_prim_depth = all ? 0.0f : slot_depth();
-    if (keep_big || !oversize(v)) g_be->tri(v, g_st);
-    if (quad && (keep_big || !oversize(v + 1))) g_be->tri(v + 1, g_st);
+    // A primitive of the world list has no depth of its own. On the console the sort order hid it
+    // behind nearer geometry; with native geometry drawn first it would show through walls and
+    // characters: test it at its slot's depth.
+    g_prim_depth = slot_depth();
+    if (!oversize(v)) g_be->tri(v, g_st);
+    if (quad && !oversize(v + 1)) g_be->tri(v + 1, g_st);
     g_prim_depth = 0.0f;
 }
 
@@ -573,8 +440,8 @@ static void exec_cmd() {
     if (cmd >= 0x20 && cmd < 0x40) { draw_polygon(); return; }
     if (cmd >= 0x40 && cmd < 0x60) {
         bool gouraud = cmd & 0x10;
-        GpuVtx a = make_vtx(g_fifo[1], g_fifo[0], 0, 0);
-        GpuVtx b = gouraud ? make_vtx(g_fifo[3], g_fifo[2], 0, 0) : make_vtx(g_fifo[2], g_fifo[0], 0, 0);
+        GpuVtx a = make_vtx(g_fifo[1], g_fifo[0], 0);
+        GpuVtx b = gouraud ? make_vtx(g_fifo[3], g_fifo[2], 0) : make_vtx(g_fifo[2], g_fifo[0], 0);
         draw_line_seg(a, b, gouraud, cmd & 2);
         if (cmd & 8) {
             g_poly_line = true;
@@ -662,7 +529,7 @@ void gpu_write_gp0(u32 v) {
     if (g_poly_line) {
         if ((v & 0xF000F000) == 0x50005000) { g_poly_line = false; return; }
         if (g_pl_expect_color) { g_pl_color = v; g_pl_expect_color = false; return; }
-        GpuVtx b = make_vtx(v, g_pl_color, 0, 0);
+        GpuVtx b = make_vtx(v, g_pl_color, 0);
         bool semi = g_st.semi;
         draw_line_seg(g_pl_prev, b, g_pl_gouraud, semi);
         g_pl_prev = b;
@@ -751,6 +618,7 @@ void gpu_write_gp1(u32 v) {
 
 // Walk one display list. Returns the number of ordering-table slots it contained.
 void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, int cx1, int cy1, int cx2, int cy2);
+bool level3d_listed(u32 slot_addr);
 static int walk_list(u32 madr, bool draw) {
     u32 a = madr & 0x1FFFFC;
     int guard = 0;
@@ -766,7 +634,10 @@ static int walk_list(u32 madr, bool draw) {
         if (n == 0 && a <= ot_top && ot_top - a < 0x10000 && (a == ot_top || a + 4 == ot_last || a == ot_last)) {
             ot_last = a; ot_slots++; g_ot_index = (int)((ot_top - a) >> 2);
             // the native level geometry goes in right after the farthest slot (the sky dome)
-            if (g_ot_index == 1 && draw && !g_collect) level3d_emit(a | 0x80000000u, g_noside, g_interp_pass, g_off_x, g_off_y, g_st.cx1, g_st.cy1, g_st.cx2, g_st.cy2);
+            if (g_ot_index == 1 && draw && level3d_listed(a)) {
+                g_last_3d_frame = g_frame; g_list_had_3d = true; g_collect_3d = true;
+                if (!g_collect) level3d_emit(a | 0x80000000u, g_noside, g_interp_pass, g_off_x, g_off_y, g_st.cx1, g_st.cy1, g_st.cx2, g_st.cy2);
+            }
         }
         if (draw)
             for (u32 i = 1; i <= n; i++) {
@@ -805,15 +676,14 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
         int slots = walk_list(madr, false);
         g_list_3d = slots >= 1024;
         g_ot_slots_cur = slots;
-        g_sub_n = 0;
         // 2D layers: the HUD's own small table, or any list while no 3D is on screen (menus, loading)
         bool is2d = g_hud_fix && g_cfg.widescreen && g_ws_scale != 1.0f && slots > 0 &&
-                    (slots <= 64 || g_frame - g_last_pgxp_frame > 6 || slots >= 1024);
+                    (slots <= 64 || g_frame - g_last_3d_frame > 6 || slots >= 1024);
         if (is2d) {
             FrontState fs = {g_stat, g_st, g_off_x, g_off_y, {g_e1, g_e2, g_e3, g_e4, g_e5, g_e6}, g_fifo_n, g_fifo_need, g_poly_line, g_xfer_mode};
             g_boxes.clear();
             g_box3d.clear();
-            bool in_game = g_frame - g_last_pgxp_frame <= 6;
+            bool in_game = g_frame - g_last_3d_frame <= 6;
             g_collect_3d = false;
             g_collect = true;
             walk_list(madr, true);
@@ -822,7 +692,6 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
             // nearly empty list carries HUD text such as the scope's info line)
             if (g_log_level >= 3 && (g_frame % 100) < 2) logf("  collect: %d boxes, 3d=%d in_game=%d clip %d..%d\n", (int)g_boxes.size(), (int)g_collect_3d, (int)in_game, g_clip_l, g_clip_r);
             g_world_layout = slots > 64 && in_game && g_collect_3d;
-            g_sub_n = 0;
             layout_2d(g_ws_scale);
             g_stat = fs.stat; g_st = fs.st; g_off_x = fs.offx; g_off_y = fs.offy;
             g_e1 = fs.e[0]; g_e2 = fs.e[1]; g_e3 = fs.e[2]; g_e4 = fs.e[3]; g_e5 = fs.e[4]; g_e6 = fs.e[5];
@@ -830,21 +699,16 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
             g_tf_i = 0;
             g_tf_on = true;
         }
-        // Frame interpolation: replay the list into the in-between layer first, with every tracked
-        // polygon moved halfway back to where it was in the previous game frame.
+        // Frame interpolation: replay the list into the in-between layer first; the native scene is
+        // drawn there from halfway between the previous and this game frame.
         if (g_cfg.interp && g_be->target) {
-            extern int g_mv_matched, g_mv_far;
-            bool cut = g_mv_matched > 40 && g_mv_far * 3 > g_mv_matched;   // camera cut: nothing to blend
-            if (g_log_level >= 3 && slots >= 1024 && (g_frame % 20) < 2)
-                logf("interp frame %d: %d vertices matched to last frame, %d moved far, cut=%d\n", g_frame, g_mv_matched, g_mv_far, (int)cut);
             FrontState f2 = {g_stat, g_st, g_off_x, g_off_y, {g_e1, g_e2, g_e3, g_e4, g_e5, g_e6}, g_fifo_n, g_fifo_need, g_poly_line, g_xfer_mode};
             g_be->target(1);
             g_list_had_3d = false;
-            g_interp_pass = !cut;
+            g_interp_pass = true;   // camera cuts: the native scene does not blend across them
             g_noside = true;
             g_in_list = true;
             g_tf_i = 0;
-            g_sub_n = 0;
             walk_list(madr, true);
             g_interp_pass = false;
             g_noside = false;
@@ -854,14 +718,11 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
             g_e1 = f2.e[0]; g_e2 = f2.e[1]; g_e3 = f2.e[2]; g_e4 = f2.e[3]; g_e5 = f2.e[4]; g_e6 = f2.e[5];
             g_fifo_n = f2.fifo_n; g_fifo_need = f2.fifo_need; g_poly_line = f2.poly_line; g_xfer_mode = f2.xfer_mode;
             g_tf_i = 0;
-            g_sub_n = 0;
         }
         g_in_list = true;
         g_list_had_3d = false;
         walk_list(madr, true);
         g_in_list = false;
-        // one "frame" of vertex history per world list (the game also sends an empty second big list)
-        if (slots >= 1024 && g_list_had_3d) pgxp_cache_next_frame();
         g_tf_on = false;
         g_st.xs_a = 0;
         g_st.xs_k = 1;
@@ -919,7 +780,6 @@ void spu_frame();
 
 void gpu_vblank() {
     g_frame++;
-    gte_near_frame(g_frame);
     g_field ^= 1;
     { extern void mods_frame(); mods_frame(); }
     GpuDisplay d = cur_display();
@@ -1033,6 +893,6 @@ void gpu_state(StateIO& s) {
         g_be->upload(0, 0, 1024, 512, vram.data(), st);
         memcpy(g_vram, shadow.data(), shadow.size() * 2);
         g_scope_flag_frame = g_scope_seen = -100;
-        g_last_pgxp_frame = -100;
+        g_last_3d_frame = -100;
     }
 }

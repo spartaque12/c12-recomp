@@ -32,9 +32,6 @@ static void parse_kv(const std::string& k, const std::string& v) {
             if (k.substr(5) == g_btn_key[b]) sscanf(v.c_str(), "%d,%d", &g_cfg.binds[b][0], &g_cfg.binds[b][1]);
     }
     else if (k == "overlays_native") { extern int g_overlays_native; g_overlays_native = atoi(v.c_str()); }
-    else if (k == "pgxp_cull") { extern int g_pgxp_cull; g_pgxp_cull = atoi(v.c_str()); }
-    else if (k == "dbg_near") { extern int g_dbg_near; g_dbg_near = atoi(v.c_str()); }
-    else if (k == "big_polys") { extern int g_big_polys; g_big_polys = atoi(v.c_str()); }
     else if (k == "ws_frustum") { extern int g_ws_frustum; g_ws_frustum = atoi(v.c_str()); }
     else if (k == "shot_from") { extern int g_shot_from; g_shot_from = atoi(v.c_str()); }
     else if (k == "ws_flags") { extern int g_ws_flags; g_ws_flags = atoi(v.c_str()); }
@@ -45,25 +42,10 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k == "save_state_at") { extern int g_state_save_frame; g_state_save_frame = atoi(v.c_str()); }
     else if (k == "n3_parts") { extern int g_n3_parts; g_n3_parts = atoi(v.c_str()); }
     else if (k == "level3d") { extern int g_level3d; g_level3d = atoi(v.c_str()); }
-    else if (k == "near_keep") { extern int g_near_keep; g_near_keep = atoi(v.c_str()); }
-    else if (k == "near_keep_fn") {   // comma separated guest function addresses (hex)
-        extern u32 g_near_keep_fn[16]; extern int g_near_keep_n;
-        g_near_keep_n = 0;
-        for (size_t p = 0; p < v.size() && g_near_keep_n < 16;) {
-            size_t q = v.find(',', p);
-            if (q == std::string::npos) q = v.size();
-            g_near_keep_fn[g_near_keep_n++] = strtoul(v.substr(p, q - p).c_str(), nullptr, 16) | 0x80000000u;
-            p = q + 1;
-        }
-    }
-    else if (k == "near_log") { extern int g_near_log; g_near_log = atoi(v.c_str()); }
-    else if (k == "near_clip") { extern int g_near_clip; g_near_clip = atoi(v.c_str()); }
     else if (k == "load_state_at") { extern int g_state_load_frame; g_state_load_frame = atoi(v.c_str()); }
     else if (k == "trace_fn") { extern u32 g_trace_fn; g_trace_fn = strtoul(v.c_str(), nullptr, 16); }
     else if (k == "dbg_skip") { extern int g_dbg_skip; g_dbg_skip = atoi(v.c_str()); }
     else if (k == "cam_log") { extern int g_cam_log; g_cam_log = atoi(v.c_str()); }
-    else if (k == "near_plane_cull") { extern int g_near_plane_cull; g_near_plane_cull = atoi(v.c_str()); }
-    else if (k == "near_cull") { extern float g_near_cull; g_near_cull = (float)atof(v.c_str()); }
     else if (k == "ramdump") { extern int g_ramdump_every; g_ramdump_every = atoi(v.c_str()); }
     else if (k == "ws_view") { extern int g_ws_view; g_ws_view = atoi(v.c_str()); }
     else if (k == "hud_fix") { extern int g_hud_fix; g_hud_fix = atoi(v.c_str()); }
@@ -74,8 +56,6 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k.rfind("n3_", 0) == 0) { extern void n3_option(const char*, const char*); n3_option(k.c_str(), v.c_str()); }
     else if (k == "scale") I(g_cfg.scale);
     else if (k == "widescreen") I(g_cfg.widescreen);
-    else if (k == "pgxp") I(g_cfg.pgxp);
-    else if (k == "perspective") I(g_cfg.persp);
     else if (k == "filter") I(g_cfg.filter);
     else if (k == "vsync") I(g_cfg.vsync);
     else if (k == "fullscreen") I(g_cfg.fullscreen);
@@ -83,6 +63,7 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k == "height") I(g_cfg.win_h);
     else if (k == "cpu_bias") g_cfg.cpu_bias = atof(v.c_str());
     else if (k == "fps60") {}   // removed option (2x-speed 50 fps); still accepted in old ini files
+    else if (k == "pgxp" || k == "perspective" || k == "near_clip" || k == "near_keep") {}   // removed with PGXP
     else if (k == "audio_interp") I(g_cfg.audio_interp);
     else if (k == "audio_latency_ms") I(g_cfg.audio_latency_ms);
     else if (k == "reverb") I(g_cfg.reverb);

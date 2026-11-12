@@ -51,7 +51,11 @@ struct LvTri { LvVtx v[3]; N3Mat m; };
 struct Camera { float R[9]; float eye[3]; float h, ofx, ofy; };
 // A group of triangles sharing one model->world transform (the level: identity). Moving objects are
 // keyed (object address, part) so the in-between frame can find last frame's transform and blend.
-struct Group { uint64_t key; float M[12]; u32 first, count; };   // M: R row-major 3x3, then t
+// kind: 0 normal, 1 sky (view = camera rotation only, drawn first in a pass of its own without depth
+// against the rest). bias: the group is pulled toward the eye by this fraction of its depth (decals,
+// shadows lying on a surface; the screen position does not change).
+enum { GK_NORMAL, GK_SKY };
+struct Group { uint64_t key; float M[12]; u32 first, count; int kind; float bias; };   // M: R row-major 3x3, then t
 struct Capture {
     bool valid = false, drawn = false;
     u32 seq = 0;
@@ -101,9 +105,11 @@ static Capture* scene_cap() {
     return &n;
 }
 static const float k_ident[12] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
-static Group& group_begin(Capture& cap, uint64_t key, const float M[12]) {
+static Group& group_begin(Capture& cap, uint64_t key, const float M[12], int kind = GK_NORMAL, float bias = 0.0f) {
     Group g;
     g.key = key;
+    g.kind = kind;
+    g.bias = bias;
     memcpy(g.M, M, sizeof g.M);
     g.first = (u32)cap.tris.size();
     g.count = 0;
@@ -244,6 +250,14 @@ static void lerp_cam(const Camera& a, const Camera& b, float t, Camera& o) {
     o.ofx = b.ofx; o.ofy = b.ofy;
 }
 
+// the display list this ordering-table slot belongs to has a native scene
+bool level3d_listed(u32 slot_addr) {
+    slot_addr &= 0x1FFFFF;
+    if (!n3_available()) return false;
+    for (auto& c : g_cap) if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi) return true;
+    return false;
+}
+
 // Called by the front-end while walking a display list, once its farthest ordering-table slot has been
 // drawn. slot_addr: RAM address of a table slot of this list; interp: drawing the in-between frame
 // (blend = move halfway back to the previous frame: camera and every object found in both frames).
@@ -290,16 +304,28 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
                 for (int i = 0; i < 12; i++) M[i] = (M[i] + p->M[i]) * 0.5f;
         }
     }
-    for (const LvTri& t : cap->tris) {
-        N3Vtx o[3];
-        for (int i = 0; i < 3; i++) {
-            const LvVtx& lv = t.v[i];
-            float p[3] = {lv.x, lv.y, lv.z}, w[3], q[3];
-            if (lv.g < 0) view_of(cam, p, q);
-            else { xform(gm[lv.g].data(), p, w); view_of(cam, w, q); }
-            o[i] = N3Vtx{q[0], q[1], q[2], lv.u, lv.v, lv.rgb};
+    // the sky first, in a pass of its own (its depth buffer is cleared again for the scene)
+    bool has_sky = false;
+    for (const Group& g : cap->groups) if (g.kind == GK_SKY && g.count) has_sky = true;
+    for (int pass = has_sky ? 0 : 1; pass < 2; pass++) {
+        if (pass == 1 && has_sky) { n3_end(); n3_begin(v); }
+        for (const LvTri& t : cap->tris) {
+            int g0 = t.v[0].g;
+            int kind = g0 >= 0 ? cap->groups[g0].kind : GK_NORMAL;
+            if ((kind == GK_SKY) != (pass == 0)) continue;
+            float bias = g0 >= 0 ? cap->groups[g0].bias : 0.0f;
+            N3Vtx o[3];
+            for (int i = 0; i < 3; i++) {
+                const LvVtx& lv = t.v[i];
+                float p[3] = {lv.x, lv.y, lv.z}, w[3], q[3];
+                if (lv.g < 0) view_of(cam, p, q);
+                else if (kind == GK_SKY) { xform(gm[lv.g].data(), p, w); for (int k = 0; k < 3; k++) q[k] = cam.R[k * 3] * w[0] + cam.R[k * 3 + 1] * w[1] + cam.R[k * 3 + 2] * w[2]; }
+                else { xform(gm[lv.g].data(), p, w); view_of(cam, w, q); }
+                if (bias != 0.0f) for (int k = 0; k < 3; k++) q[k] *= 1.0f - bias;
+                o[i] = N3Vtx{q[0], q[1], q[2], lv.u, lv.v, lv.rgb};
+            }
+            n3_tri(o, t.m);
         }
-        n3_tri(o, t.m);
     }
     n3_end();
     if (!interp) { g_last_cam = cap->cam; g_last_ok = true; g_last_groups = cap->groups; cap->drawn = true; }
