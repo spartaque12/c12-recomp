@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include "ui.h"
+#include "savestate.h"
 #include "../third_party/imgui/imgui.h"
 int mods_ui_count();
 void mods_ui();
@@ -154,6 +155,27 @@ static void draw_menu() {
     if (ImGui::Button(g_classic ? "Showing: CLASSIC  (Tab)" : "Showing: REMASTERED  (Tab)", ImVec2(250 * g_ui_scale, 0))) settings_toggle_classic();
     ImGui::SameLine();
     ImGui::TextDisabled("Tab switches at any time");
+    {   // save states (same as F5 / F9, slot = F6 / F7)
+        extern int g_state_slot;
+        ImGui::SetNextItemWidth(110 * g_ui_scale);
+        ImGui::SliderInt("##slot", &g_state_slot, 1, 9, "Slot %d");
+        ImGui::SameLine();
+        if (ImGui::Button("Save state (F5)")) state_request_save(state_quick_path());
+        ImGui::SameLine();
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        bool have = GetFileAttributesExA(state_quick_path(), GetFileExInfoStandard, &fa) != 0;
+        ImGui::BeginDisabled(!have);
+        if (ImGui::Button("Load state (F9)")) { state_request_load(state_quick_path()); g_open = false; }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (have) {
+            FILETIME lt;
+            SYSTEMTIME st;
+            FileTimeToLocalFileTime(&fa.ftLastWriteTime, &lt);
+            FileTimeToSystemTime(&lt, &st);
+            ImGui::TextDisabled("saved %02d.%02d. %02d:%02d", st.wDay, st.wMonth, st.wHour, st.wMinute);
+        } else ImGui::TextDisabled("empty slot");
+    }
     if (ImGui::BeginTabBar("tabs")) {
         if (ImGui::BeginTabItem("Video")) {
             if (g_classic) ImGui::TextColored(ImVec4(1, 0.8f, 0.3f, 1), "Classic view is active: these show the classic preset.");
