@@ -422,6 +422,20 @@ static void draw_hook(uint32_t* r, C12OrigFn orig) {
  * shooting) before it. The eye sits in the hero's head only during it; afterwards the game's own camera
  * position is put back, because the game works out camera-relative controls (on ladders, on top of
  * boxes) and smooths its camera from it, and a camera inside the hero breaks both. */
+/* 8006540c(world) picks the visible part of the level for this frame (camera setup 80065570, then the
+ * walk over the level's cells 800681a0) - in the game logic, before 8003836c, where the view object
+ * still holds the game's own camera position. Seen from there, places the eye sees (beside and below
+ * it, from high ground) were left out and stayed black: it gets the eye for the duration of the call. */
+static void visibility_hook(uint32_t* r, C12OrigFn orig) {
+    uint32_t cam = g_cam;
+    uint32_t vo = is_ptr(cam) ? (uint32_t)r32(cam + 0x40) : 0;
+    if (!was_on || !vm_ok || !is_ptr(vo) || in_render) { orig(r); return; }
+    int32_t keep[3];
+    for (int i = 0; i < 3; i++) { keep[i] = r32(vo + 0x20 + i * 4); w32(vo + 0x20 + i * 4, (int32_t)vm_eye[i]); }
+    orig(r);
+    for (int i = 0; i < 3; i++) w32(vo + 0x20 + i * 4, keep[i]);
+}
+
 static void render_hook(uint32_t* r, C12OrigFn orig) {
     saved_eye_vo = 0;
     in_render = 1;
@@ -578,5 +592,5 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("vm_pitch", "Weapon: tilt (degrees)", &vm_pitch, -90.0f, 90.0f);
     api->hook(0x8005f380, sfx_hook);
     if (api->version >= 3) api->on_state_loaded(state_loaded);
-    return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook) && api->hook(0x8002c048, physics_hook) && api->hook(0x8003836c, render_hook) && api->hook(0x8002bb90, move_prep_hook) && api->hook(0x80022154, run_hook);
+    return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook) && api->hook(0x8002c048, physics_hook) && api->hook(0x8003836c, render_hook) && api->hook(0x8002bb90, move_prep_hook) && api->hook(0x80022154, run_hook) && api->hook(0x8006540c, visibility_hook);
 }
