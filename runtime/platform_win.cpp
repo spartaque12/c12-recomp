@@ -485,7 +485,9 @@ void plat_pump() {
     if (g_turbo && !ui_menu_open()) { g_next_frame = now; return; }
     if (g_next_frame < now - 0.1) g_next_frame = now;
     g_next_frame += period;
-    plat_sleep_until(g_next_frame);
+    extern void (*g_vr_pacer)(double until);
+    if (g_vr_pacer) g_vr_pacer(g_next_frame);   // a VR mod: headset frames until then
+    else plat_sleep_until(g_next_frame);
 }
 
 void plat_shutdown() {}

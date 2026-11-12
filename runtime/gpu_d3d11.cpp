@@ -33,7 +33,17 @@ static ID3D11RenderTargetView* vram_rtv;
 static ID3D11Texture2D* itex;            // in-between frame layer (same layout as VRAM)
 static ID3D11RenderTargetView* i_rtv;
 static ID3D11ShaderResourceView* i_srv;
-static int cur_target;                   // 0 = VRAM, 1 = in-between layer
+static int cur_target;                   // 0 = VRAM, 1 = in-between layer, 2.. = extra targets (VR)
+// Extra targets (VR, see gpu.h): 2 / 3 = left / right eye, 4 / 5 = the HUD drawn over black / over white, 6 = cinema.
+// Each has its own size and depth buffer and shows one display area of the VRAM coordinate space
+// (mx, my .. + dw, dh) stretched over the whole texture, so every primitive, scissor and native 3D
+// clip-space formula made for VRAM pixels works unchanged.
+struct XTarget {
+    ID3D11Texture2D* tex; ID3D11RenderTargetView* rtv; ID3D11ShaderResourceView* srv;
+    ID3D11Texture2D* dt; ID3D11DepthStencilView* dsv;
+    int w, h; float mx, my, sx, sy;
+};
+static XTarget xt[5];
 static ID3D11ShaderResourceView *vram_srv, *copy_srv, *upload_srv;
 static ID3D11VertexShader *vs_prim, *vs_full;
 static ID3D11PixelShader *ps_prim, *ps_upload, *ps_present, *ps_blit;
@@ -57,7 +67,7 @@ static int cur_kind = -1;
 static ID3D11Texture2D* dtex[2];
 static ID3D11DepthStencilView* dsv[2];
 static ID3D11DepthStencilState* ds_state[3];
-static int depth_frame[2] = {-1000, -1000};   // g_frame (vblank count) at the last n3_begin on that target
+static int depth_frame[7] = {-1000, -1000, -1000, -1000, -1000, -1000, -1000};   // g_frame at the last n3_begin on that target
 int g_n3_depth_ps1 = 1;
 float g_prim_depth;   // > 0: view depth of a flat (2D) primitive of the world list, from its sort slot
 int g_n3_selftest = 0;
@@ -229,7 +239,20 @@ static void set_cb(int pass_mode, float a = 0, float b = 0, float c2 = 0, float 
     ctx->UpdateSubresource(cbuf, 0, nullptr, &cb, 0, 0);
 }
 
+// the bound target's mapping from VRAM pixels: target pixel = (vram - m) * s
+static void target_map(float& mx, float& my, float& sx, float& sy) {
+    if (cur_target >= 2) { const XTarget& t = xt[cur_target - 2]; mx = t.mx; my = t.my; sx = t.sx; sy = t.sy; return; }
+    mx = my = 0; sx = sy = (float)S;
+}
 static void set_vram_target(bool scissor) {
+    if (cur_target >= 2) {
+        const XTarget& t = xt[cur_target - 2];
+        ctx->OMSetRenderTargets(1, &t.rtv, t.dsv);
+        D3D11_VIEWPORT vp = {-t.mx * t.sx, -t.my * t.sy, 1024.0f * t.sx, 512.0f * t.sy, 0, 1};
+        ctx->RSSetViewports(1, &vp);
+        ctx->RSSetState(scissor ? rs_scissor : rs_plain);
+        return;
+    }
     bool il = cur_target && i_rtv;
     ctx->OMSetRenderTargets(1, il ? &i_rtv : &vram_rtv, dsv[il ? 1 : 0]);
     D3D11_VIEWPORT vp = {0, 0, 1024.0f * S, 512.0f * S, 0, 1};
@@ -253,7 +276,9 @@ static void flush() {
     memcpy(m.pData, verts, nverts * sizeof(Vtx));
     ctx->Unmap(vbuf, 0);
     set_vram_target(true);
-    D3D11_RECT sc = {cur_clip[0] * S, cur_clip[1] * S, (cur_clip[2] + 1) * S, (cur_clip[3] + 1) * S};
+    float mx, my, tsx, tsy;
+    target_map(mx, my, tsx, tsy);
+    D3D11_RECT sc = {(LONG)floorf((cur_clip[0] - mx) * tsx), (LONG)floorf((cur_clip[1] - my) * tsy), (LONG)ceilf((cur_clip[2] + 1 - mx) * tsx), (LONG)ceilf((cur_clip[3] + 1 - my) * tsy)};
     ctx->RSSetScissorRects(1, &sc);
     UINT stride = sizeof(Vtx), off = 0;
     ctx->IASetVertexBuffers(0, 1, &vbuf, &stride, &off);
@@ -330,9 +355,11 @@ static void fill_attr(Vtx& o, const GpuState& s, const float* lim) {
     memcpy(o.lim, lim, sizeof o.lim);
 }
 
+static int depth_index() { return cur_target >= 2 ? cur_target : (cur_target && i_rtv) ? 1 : 0; }
+static ID3D11DepthStencilView* depth_view(int t) { return t >= 2 ? xt[t - 2].dsv : dsv[t]; }
 static bool depth_valid() {
-    int t = (cur_target && i_rtv) ? 1 : 0;
-    return dsv[t] && g_frame - depth_frame[t] <= 4;
+    int t = depth_index();
+    return depth_view(t) && g_frame - depth_frame[t] <= 4;
 }
 static bool selftest_done[2];
 static void n3_selftest_draw(const GpuVtx* v, const GpuState& s);
@@ -455,7 +482,7 @@ static std::vector<N3Queued> n3_semi;
 
 bool n3_available() { return dev != nullptr && vram_tex != nullptr; }
 
-void n3_invalidate() { depth_frame[0] = depth_frame[1] = -1000; }
+void n3_invalidate() { for (int& f : depth_frame) f = -1000; }
 
 static GpuState n3_state(const N3Mat& m) {
     GpuState s{};
@@ -521,8 +548,8 @@ void n3_begin(const N3View& v) {
     n3v.clip_x1 = std::clamp(n3v.clip_x1, 0, 1023); n3v.clip_x2 = std::clamp(n3v.clip_x2, 0, 1023);
     n3v.clip_y1 = std::clamp(n3v.clip_y1, 0, 511); n3v.clip_y2 = std::clamp(n3v.clip_y2, 0, 511);
     if (n3v.ws_scale == 0.0f) n3v.ws_scale = 1.0f;
-    int t = (cur_target && i_rtv) ? 1 : 0;
-    if (dsv[t]) ctx->ClearDepthStencilView(dsv[t], D3D11_CLEAR_DEPTH, 0.0f, 0);
+    int t = depth_index();
+    if (depth_view(t)) ctx->ClearDepthStencilView(depth_view(t), D3D11_CLEAR_DEPTH, 0.0f, 0);
     depth_frame[t] = g_frame;
     n3_semi.clear();
     n3_on = true;
@@ -995,6 +1022,102 @@ bool hw_backend_init() {
     atexit(hdtex_stats);
     logf("d3d11 renderer: %dx internal resolution (%dx%d VRAM)%s\n", S, 1024 * S, 512 * S, tearing ? ", tearing allowed" : "");
     return true;
+}
+
+// ---- extra targets for VR (gpu.h) ---------------------------------------------------------------
+// (Re)make extra target `which` (2..5) at w x h with a depth buffer; false if out of video memory.
+bool hw_xtarget_make(int which, int w, int h) {
+    if (!dev || which < 2 || which > 6 || w <= 0 || h <= 0) return false;
+    XTarget& t = xt[which - 2];
+    if (t.tex && t.w == w && t.h == h) return true;
+    flush();
+    rel(t.rtv); rel(t.srv); rel(t.tex); rel(t.dsv); rel(t.dt);
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, &t.tex))) { t.w = t.h = 0; return false; }
+    dev->CreateRenderTargetView(t.tex, nullptr, &t.rtv);
+    dev->CreateShaderResourceView(t.tex, nullptr, &t.srv);
+    td.Format = DXGI_FORMAT_D32_FLOAT; td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &t.dt))) dev->CreateDepthStencilView(t.dt, nullptr, &t.dsv);
+    t.w = w; t.h = h;
+    depth_frame[which] = -1000;
+    return true;
+}
+
+// Show the VRAM display area x, y, w x h on the whole of extra target `which`, and clear it.
+void hw_xtarget_begin(int which, int x, int y, int w, int h, const float rgba[4]) {
+    if (which < 2 || which > 6) return;
+    XTarget& t = xt[which - 2];
+    if (!t.rtv || w <= 0 || h <= 0) return;
+    flush();
+    t.mx = (float)x; t.my = (float)y; t.sx = (float)t.w / w; t.sy = (float)t.h / h;
+    ctx->ClearRenderTargetView(t.rtv, rgba);
+    if (t.dsv) ctx->ClearDepthStencilView(t.dsv, D3D11_CLEAR_DEPTH, 0.0f, 0);
+    depth_frame[which] = -1000;
+    cur_kind = -1;
+}
+
+// test: write extra target `which` to a BMP
+bool hw_xtarget_save(int which, const char* path) {
+    if (which < 2 || which > 6) return false;
+    XTarget& t = xt[which - 2];
+    if (!t.tex) return false;
+    flush();
+    D3D11_TEXTURE2D_DESC d = {};
+    d.Width = t.w; d.Height = t.h; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_STAGING; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* st = nullptr;
+    if (FAILED(dev->CreateTexture2D(&d, nullptr, &st))) return false;
+    ctx->CopyResource(st, t.tex);
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ctx->Map(st, 0, D3D11_MAP_READ, 0, &m))) { st->Release(); return false; }
+    std::vector<u32> px((size_t)t.w * t.h);
+    for (int y = 0; y < t.h; y++) {
+        const u32* row = (const u32*)((const u8*)m.pData + (size_t)y * m.RowPitch);
+        for (int x = 0; x < t.w; x++) { u32 p = row[x]; px[(size_t)y * t.w + x] = 0xFF000000u | ((p & 255) << 16) | (p & 0xFF00) | ((p >> 16) & 255); }
+    }
+    ctx->Unmap(st, 0);
+    st->Release();
+    return write_bmp(path, px.data(), t.w, t.h);
+}
+
+// show another VRAM area on the bound extra target, without clearing it
+void hw_xtarget_remap(int x, int y, int w, int h) {
+    if (cur_target < 2 || w <= 0 || h <= 0) return;
+    XTarget& t = xt[cur_target - 2];
+    flush();
+    t.mx = (float)x; t.my = (float)y; t.sx = (float)t.w / w; t.sy = (float)t.h / h;
+    cur_kind = -1;
+}
+
+void* hw_xtarget_texture(int which) { return (which >= 2 && which <= 6) ? (void*)xt[which - 2].tex : nullptr; }
+
+// the picture the window shows (the display area of VRAM or of the in-between layer), for a flat
+// "cinema" screen: copied into extra target `which`, stretched over it
+void hw_xtarget_copy_display(int which, const GpuDisplay& d) {
+    if (which < 2 || which > 6) return;
+    XTarget& t = xt[which - 2];
+    if (!t.rtv) return;
+    flush();
+    ctx->OMSetRenderTargets(1, &t.rtv, nullptr);
+    D3D11_VIEWPORT vp = {0, 0, (float)t.w, (float)t.h, 0, 1};
+    ctx->RSSetViewports(1, &vp);
+    ctx->RSSetState(rs_plain);
+    float bf[4] = {1, 1, 1, 1};
+    ctx->OMSetBlendState(bs_opaque, bf, ~0u);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(vs_full, nullptr, 0);
+    ctx->PSSetShader(ps_present, nullptr, 0);
+    ctx->PSSetShaderResources(0, 1, (d.interp && i_srv) ? &i_srv : &vram_srv);
+    ctx->PSSetSamplers(0, 1, &smp_linear);
+    ctx->PSSetConstantBuffers(0, 1, &cbuf);
+    set_cb(0, d.x / 1024.0f, d.y / 512.0f, d.w / 1024.0f, d.h / 512.0f);
+    ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* nul = nullptr;
+    ctx->PSSetShaderResources(0, 1, &nul);
+    cur_kind = -1;
 }
 
 GpuBackend g_hw_backend = {hw_tri, hw_rect, hw_line, hw_fill, hw_copy, hw_upload, hw_download, hw_present, hw_screenshot, hw_target};

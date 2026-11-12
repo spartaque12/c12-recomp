@@ -173,6 +173,7 @@ void mods_init() {
     api.pad = api_pad;
     api.set_aim_origin = api_set_aim_origin;
     api.on_state_loaded = api_on_state_loaded;
+    { void vr_fill_api(C12ModApi& api); vr_fill_api(api); }
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA((dir + "\\*.dll").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;

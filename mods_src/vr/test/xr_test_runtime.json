@@ -1,0 +1,7 @@
+{
+    "file_format_version": "1.0.0",
+    "runtime": {
+        "name": "C12 xr_test_runtime",
+        "library_path": "vr_xr_test_runtime.dll"
+    }
+}

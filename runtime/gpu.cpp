@@ -1,5 +1,6 @@
 // GPU front-end: GP0/GP1 decoding, DMA, video timing. Rendering is delegated to a GpuBackend.
 #include "gpu.h"
+#include "vr.h"
 #include "ui.h"
 #include <algorithm>
 #include "savestate.h"
@@ -287,6 +288,46 @@ static float slot_depth() {
     return (g_list_3d && g_ot_slots_cur >= 1024 && game_slot >= 8) ? (float)(game_slot * 8) * 0.97f : 0.0f;
 }
 
+// ---- VR: what an eye or the HUD pass draws, and flat primitives moved into the eye's view ------------
+int g_vr_pass;
+const VrEyeXf* g_vr_xf;
+bool g_vr_active;
+static bool g_vr_list_world;   // the list being replayed is the world list
+static bool vr_skip() {
+    bool front = g_vr_list_world && g_ot_index >= 0 && g_ot_slots_cur - 1 - g_ot_index < 8;
+    if (g_vr_pass == 1) return !g_vr_list_world || front;   // eyes: the world list, without its 2D panels
+    return g_vr_list_world && !front;                        // HUD: HUD lists and the world list's 2D panels
+}
+// game screen position at depth z (the primitive's sort slot) -> the eye's screen; false = behind the eye
+static float g_vr_zeye;   // depth in the eye of the last primitive moved (average)
+static bool vr_move(float& px, float& py, float z, float* ze = nullptr) {
+    const VrEyeXf& e = *g_vr_xf;
+    float t[3] = {(px - e.gx0) * z / e.ghx, (py - e.gy0) * z / e.ghy, z};
+    float d[3] = {t[0] - e.pos[0], t[1] - e.pos[1], t[2] - e.pos[2]};
+    float q[3];
+    for (int i = 0; i < 3; i++) q[i] = e.R[i * 3] * d[0] + e.R[i * 3 + 1] * d[1] + e.R[i * 3 + 2] * d[2];
+    if (q[2] < 4.0f) return false;
+    if (ze) *ze = q[2];
+    px = e.cx + q[0] / q[2] * e.hx;
+    py = e.cy + q[1] / q[2] * e.hy;
+    return true;
+}
+static bool vr_move_vtx(GpuVtx* v, int n) {
+    float z = slot_depth();
+    if (z <= 0.0f) return false;
+    float sum = 0.0f;
+    for (int k = 0; k < n; k++) {
+        float ze;
+        if (!vr_move(v[k].px, v[k].py, z, &ze)) return false;
+        sum += ze;
+        v[k].x = (int)floorf(v[k].px + 0.5f);
+        v[k].y = (int)floorf(v[k].py + 0.5f);
+    }
+    g_vr_zeye = sum / n;
+    return true;
+}
+static float prim_depth() { return g_vr_pass == 1 ? g_vr_zeye : slot_depth(); }
+
 bool scene3d_enabled();
 static void draw_polygon() {
     u32 cmd = g_fifo[0] >> 24;
@@ -316,6 +357,7 @@ static void draw_polygon() {
     g_st.semi = cmd & 2;
     g_st.gouraud = gouraud;
     g_st.dither = (g_stat & 0x200) && (gouraud || (tex && !g_st.raw));
+    if (g_vr_pass && (vr_skip() || (g_vr_pass == 1 && !vr_move_vtx(v, n)))) return;
     // a polygon of the world scene (the front-most slots of the world list may hold a 2D panel)
     bool scene = g_list_3d && g_ot_index < g_ot_slots_cur - 8;
     if (scene && !scene3d_enabled()) { g_last_3d_frame = g_frame; g_list_had_3d = true; g_collect_3d = true; }
@@ -341,7 +383,7 @@ static void draw_polygon() {
     // A primitive of the world list has no depth of its own. On the console the sort order hid it
     // behind nearer geometry; with native geometry drawn first it would show through walls and
     // characters: test it at its slot's depth.
-    g_prim_depth = slot_depth();
+    g_prim_depth = prim_depth();
     if (!oversize(v)) g_be->tri(v, g_st);
     if (quad && !oversize(v + 1)) g_be->tri(v + 1, g_st);
     g_prim_depth = 0.0f;
@@ -367,6 +409,15 @@ static void draw_rect() {
     g_st.gouraud = false;
     g_st.dither = false;
     if (prim_2d(x, y, x + w, y + h)) return;
+    if (g_vr_pass) {
+        if (vr_skip()) return;
+        if (g_vr_pass == 1) {   // a sprite: its corners into the eye's view, at its sort depth
+            float z = slot_depth(), x0 = (float)x, y0 = (float)y, x1 = (float)(x + w), y1 = (float)(y + h);
+            if (z <= 0.0f || !vr_move(x0, y0, z, &g_vr_zeye) || !vr_move(x1, y1, z)) return;
+            x = (int)floorf(x0 + 0.5f); y = (int)floorf(y0 + 0.5f);
+            w = std::max(1, (int)floorf(x1 + 0.5f) - x); h = std::max(1, (int)floorf(y1 + 0.5f) - y);
+        }
+    }
     y += (int)g_st.ys;
     x += (int)g_st.xs_dx;
     if (g_dbg_file) { fprintf(g_dbg_file, "rect %02x ot %d: %d,%d %dx%d uv %d,%d tp %d,%d", cmd, g_ot_index, x, y, w, h, uv & 0xFF, (uv >> 8) & 0xFF, g_st.tpx, g_st.tpy); fputc(10, g_dbg_file); }
@@ -382,7 +433,7 @@ static void draw_rect() {
         if (!tex && !(cmd & 2) && w >= 500 && h == 32 && (scope_now || g_frame - g_scope_seen <= 1)) { g_scope_seen = g_frame; return; }
         if (!tex && (cmd & 2) && w >= 500 && h >= 150 && g_frame - g_scope_seen <= 1) return;
     }
-    g_prim_depth = slot_depth();
+    g_prim_depth = prim_depth();
     g_be->rect(x, y, w, h, uv & 0xFF, (uv >> 8) & 0xFF, g_fifo[0] & 0xFFFFFF, g_st);
     g_prim_depth = 0.0f;
 }
@@ -390,8 +441,13 @@ static void draw_rect() {
 
 static int g_dbg_lines, g_dbg_thin;
 int g_laser_beam = 1;   // 0 = mods hide the laser sight's beam (lines), keeping its dot
-static void draw_line_seg(const GpuVtx& a, const GpuVtx& b, bool gouraud, bool semi) {
+static void draw_line_seg(GpuVtx a, GpuVtx b, bool gouraud, bool semi) {
     g_dbg_lines++;
+    if (g_vr_pass) {
+        GpuVtx e[2] = {a, b};
+        if (vr_skip() || (g_vr_pass == 1 && !vr_move_vtx(e, 2))) return;
+        a = e[0]; b = e[1];
+    }
     if (prim_2d(std::min(a.x, b.x), std::min(a.y, b.y), std::max(a.x, b.x) + 1, std::max(a.y, b.y) + 1)) return;
     if (g_dbg_gpu & 1) return;
     // The laser sight's beam: red lines in the 3D scene (its dot is a separate sprite). Mods can hide it.
@@ -411,12 +467,12 @@ static void draw_line_seg(const GpuVtx& a, const GpuVtx& b, bool gouraud, bool s
         GpuVtx a2 = a, b2 = b;
         a2.y += (int)g_st.ys; a2.py += g_st.ys; b2.y += (int)g_st.ys; b2.py += g_st.ys;
         a2.x += (int)g_st.xs_dx; a2.px += g_st.xs_dx; b2.x += (int)g_st.xs_dx; b2.px += g_st.xs_dx;
-        g_prim_depth = slot_depth();
+        g_prim_depth = prim_depth();
         g_be->line(a2, b2, g_st);
         g_prim_depth = 0.0f;
         return;
     }
-    g_prim_depth = slot_depth();
+    g_prim_depth = prim_depth();
     g_be->line(a, b, g_st);
     g_prim_depth = 0.0f;
 }
@@ -480,7 +536,7 @@ static void exec_cmd() {
     case 0x02: {
         int x = g_fifo[1] & 0x3F0, y = (g_fifo[1] >> 16) & 0x1FF;
         int fw = ((g_fifo[2] & 0x3FF) + 15) & ~15, fh = (g_fifo[2] >> 16) & 0x1FF;
-        if (fw && fh && !g_collect) {
+        if (fw && fh && !g_collect && g_vr_pass != 2) {
             u32 col = (g_dbg_gpu & 2) ? 0xFF00FF : (w & 0xFFFFFF);
             if (g_cfg.interp && g_be->target && !g_in_list) { g_be->target(1); g_be->fill(x, y, fw, fh, col); g_be->target(0); }   // keep the in-between layer cleared too
             g_be->fill(x, y, fw, fh, col);
@@ -669,6 +725,113 @@ struct FrontState {
     u32 stat; GpuState st; s32 offx, offy; u32 e[6]; int fifo_n, fifo_need; bool poly_line; int xfer_mode;
 };
 
+// ---- VR: the display lists of the last frame, kept to be drawn again per eye and for the HUD --------
+// A list is stored flat: per node its table slot (or -1), its RAM address and its words.
+struct RecList { FrontState fs; int slots; bool world; std::vector<u32> w; };
+static RecList g_rec_world;                       // the newest world list
+static std::vector<RecList> g_rec_hud[2];         // [0] being collected, [1] the last frame's (complete)
+static bool g_rec_have_world;
+static void vr_record(u32 madr, int slots, const FrontState& fs) {
+    bool world = false;
+    RecList L;
+    L.fs = fs;
+    L.slots = slots;
+    u32 a = madr & 0x1FFFFC, ot_top = a, ot_last = a;
+    int guard = 0;
+    for (;;) {
+        u32 hdr;
+        memcpy(&hdr, g_ram + a, 4);
+        u32 n = hdr >> 24;
+        int idx = -1;
+        if (n == 0 && a <= ot_top && ot_top - a < 0x10000 && (a == ot_top || a + 4 == ot_last || a == ot_last)) {
+            ot_last = a; idx = (int)((ot_top - a) >> 2);
+            if (idx == 1 && slots >= 1024 && level3d_listed(a)) world = true;
+        }
+        if (idx >= 0 || n) {
+            L.w.push_back((u32)idx); L.w.push_back(a | 0x80000000u); L.w.push_back(n);
+            for (u32 i = 1; i <= n; i++) { u32 w; memcpy(&w, g_ram + ((a + i * 4) & 0x1FFFFC), 4); L.w.push_back(w); }
+        }
+        if (hdr & 0x800000) break;
+        a = hdr & 0x1FFFFC;
+        if (++guard > 0x40000) break;
+    }
+    L.world = world;
+    if (world) {
+        // a new frame: the HUD collected since the last one is complete
+        g_rec_hud[1].swap(g_rec_hud[0]);
+        g_rec_hud[0].clear();
+        for (size_t i = 0; i + 2 < L.w.size(); i += 3 + L.w[i + 2])
+            if ((int)L.w[i] == 1) { level3d_vr_snapshot(L.w[i + 1]); break; }
+        g_rec_world = std::move(L);
+        g_rec_have_world = true;
+    } else g_rec_hud[0].push_back(std::move(L));
+}
+bool gpu_vr_have_world() { return g_rec_have_world; }
+bool gpu_vr_world_area(int& x, int& y, int& w, int& h, int& off_x, int& off_y) {
+    if (!g_rec_have_world) return false;
+    const GpuState& st = g_rec_world.fs.st;
+    x = st.cx1; y = st.cy1; w = st.cx2 - st.cx1 + 1; h = st.cy2 - st.cy1 + 1;
+    off_x = g_rec_world.fs.offx; off_y = g_rec_world.fs.offy;
+    return w > 16 && h > 16;
+}
+static void vr_replay_list(const RecList& L) {
+    g_stat = L.fs.stat; g_st = L.fs.st; g_off_x = L.fs.offx; g_off_y = L.fs.offy;
+    g_e1 = L.fs.e[0]; g_e2 = L.fs.e[1]; g_e3 = L.fs.e[2]; g_e4 = L.fs.e[3]; g_e5 = L.fs.e[4]; g_e6 = L.fs.e[5];
+    g_fifo_n = 0; g_fifo_need = 0; g_poly_line = false; g_xfer_mode = 0;
+    g_ot_slots_cur = L.slots;
+    g_list_3d = L.slots >= 1024;
+    g_vr_list_world = L.world;
+    g_ot_index = -1;
+    for (size_t i = 0; i + 2 < L.w.size();) {
+        int idx = (int)L.w[i];
+        u32 n = L.w[i + 2];
+        if (idx >= 0) {
+            g_ot_index = idx;
+            if (idx == 1 && L.world && g_vr_pass == 1 && g_vr_xf)
+                level3d_vr_emit(-1.0f, *g_vr_xf, L.fs.st.cx1, L.fs.st.cy1, L.fs.st.cx2, L.fs.st.cy2);
+        }
+        for (u32 k = 0; k < n; k++) gpu_write_gp0(L.w[i + 3 + k]);
+        i += 3 + n;
+    }
+    g_ot_index = -1;
+}
+void gpu_vr_replay(int pass, const VrEyeXf* xf) {
+    if (!g_rec_have_world) return;
+    FrontState keep = {g_stat, g_st, g_off_x, g_off_y, {g_e1, g_e2, g_e3, g_e4, g_e5, g_e6}, g_fifo_n, g_fifo_need, g_poly_line, g_xfer_mode};
+    int keep_slots = g_ot_slots_cur;
+    bool keep_3d = g_list_3d, keep_in = g_in_list, keep_tf = g_tf_on;
+    g_noside = true;
+    g_in_list = true;
+    g_tf_on = false;
+    g_vr_pass = pass;
+    g_vr_xf = xf;
+    if (pass == 1) vr_replay_list(g_rec_world);
+    else {
+        // HUD lists may draw into the other frame buffer of the double buffer: the target is moved onto
+        // the buffer each list draws into (same size as the world's)
+        const GpuState& ws = g_rec_world.fs.st;
+        int aw = ws.cx2 - ws.cx1 + 1, ah = ws.cy2 - ws.cy1 + 1;
+        auto buffer_of = [&](const RecList& L) {
+            int bx = aw > 0 ? (L.fs.offx / aw) * aw : 0, by = ah > 0 ? (L.fs.offy / ah) * ah : 0;
+            hw_xtarget_remap(bx, by, aw, ah);
+        };
+        for (const RecList& L : g_rec_hud[1]) { buffer_of(L); vr_replay_list(L); }
+        buffer_of(g_rec_world);
+        vr_replay_list(g_rec_world);
+    }
+    g_vr_pass = 0;
+    g_vr_xf = nullptr;
+    g_noside = false;
+    g_in_list = keep_in;
+    g_tf_on = keep_tf;
+    g_ot_slots_cur = keep_slots;
+    g_list_3d = keep_3d;
+    g_vr_list_world = false;
+    g_stat = keep.stat; g_st = keep.st; g_off_x = keep.offx; g_off_y = keep.offy;
+    g_e1 = keep.e[0]; g_e2 = keep.e[1]; g_e3 = keep.e[2]; g_e4 = keep.e[3]; g_e5 = keep.e[4]; g_e6 = keep.e[5];
+    g_fifo_n = keep.fifo_n; g_fifo_need = keep.fifo_need; g_poly_line = keep.poly_line; g_xfer_mode = keep.xfer_mode;
+}
+
 void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
     u32 mode = (chcr >> 9) & 3;
     if (mode == 2) {
@@ -718,6 +881,10 @@ void gpu_dma(u32 madr, u32 bcr, u32 chcr) {
             g_e1 = f2.e[0]; g_e2 = f2.e[1]; g_e3 = f2.e[2]; g_e4 = f2.e[3]; g_e5 = f2.e[4]; g_e6 = f2.e[5];
             g_fifo_n = f2.fifo_n; g_fifo_need = f2.fifo_need; g_poly_line = f2.poly_line; g_xfer_mode = f2.xfer_mode;
             g_tf_i = 0;
+        }
+        if (g_vr_active) {
+            FrontState fr = {g_stat, g_st, g_off_x, g_off_y, {g_e1, g_e2, g_e3, g_e4, g_e5, g_e6}, g_fifo_n, g_fifo_need, g_poly_line, g_xfer_mode};
+            vr_record(madr, slots, fr);
         }
         g_in_list = true;
         g_list_had_3d = false;
@@ -808,6 +975,8 @@ void gpu_vblank() {
             char path[512];
             snprintf(path, sizeof path, "%s/f%06d.bmp", g_cfg.shot_dir.c_str(), g_frame);
             g_be->screenshot(d, path);
+            extern void vr_test_shot(const char* dir, int frame);
+            vr_test_shot(g_cfg.shot_dir.c_str(), g_frame);
         }
         if (g_cfg.max_frames && g_frame >= g_cfg.max_frames) {
             extern u32 g_peek_ptr, g_peek_off;

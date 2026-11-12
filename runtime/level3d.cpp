@@ -31,6 +31,7 @@
 #include "gpu.h"
 #include "gpu3d.h"
 #include "savestate.h"
+#include "vr.h"
 #include <vector>
 #include <array>
 #include <math.h>
@@ -48,7 +49,9 @@ static inline bool ptr_ok(u32 p) { return (p >> 24) == 0x80 && (p & 0x1FFFFF) < 
 
 struct LvVtx { float x, y, z; float u, v; u32 rgb; int g = -1; };   // g < 0: world space (level), else model space of group g
 struct LvTri { LvVtx v[3]; N3Mat m; };
-struct Camera { float R[9]; float eye[3]; float h, ofx, ofy; };
+// R: world -> view rotation as the game uses it, including its 320x240 -> 512x256 screen stretch S
+// (diagonal sx, sy, 1: true camera space = view space / S).
+struct Camera { float R[9]; float eye[3]; float h, ofx, ofy; float sx = 1.0f, sy = 1.0f; };
 // A group of triangles sharing one model->world transform (the level: identity). Moving objects are
 // keyed (object address, part) so the in-between frame can find last frame's transform and blend.
 // kind: 0 normal, 1 sky (view = camera rotation only, drawn first in a pass of its own without depth
@@ -58,6 +61,7 @@ enum { GK_NORMAL, GK_SKY };
 struct Group { uint64_t key; float M[12]; u32 first, count; int kind; float bias; float sxy; };   // sxy: sky only, camera x/y scale   // M: R row-major 3x3, then t
 struct Capture {
     bool valid = false, drawn = false;
+    float basis[4] = {0, 0, 0, 1};   // VR: head orientation the game camera was built from (x, y, z, w)
     u32 seq = 0;
     u32 ot_lo = 0, ot_hi = 0;    // address range of its ordering table
     Camera cam;
@@ -65,6 +69,8 @@ struct Capture {
     std::vector<Group> groups;
 };
 static Capture g_cap[2];
+static float g_vr_basis[4] = {0, 0, 0, 1};
+void level3d_vr_basis(const float q[4]) { memcpy(g_vr_basis, q, sizeof g_vr_basis); }
 static int g_cap_cur;
 static u32 g_cap_seq;
 static Camera g_last_cam;        // camera of the last main (non-interpolated) emission
@@ -102,6 +108,13 @@ static Capture* scene_cap() {
     cam.h = (float)rd16(view + 0xc4);
     cam.ofx = (float)rds16(view + 0x68);
     cam.ofy = (float)rds16(view + 0x6a);
+    {   // the screen stretch S (s16 3x3 at view+0x84; its diagonal)
+        float sx = rds16(view + 0x84) / 4096.0f, sy = rds16(view + 0x8c) / 4096.0f;
+        cam.sx = sx > 0.2f && sx < 5.0f ? sx : 1.0f;
+        cam.sy = sy > 0.2f && sy < 5.0f ? sy : 1.0f;
+    }
+    memcpy(n.basis, g_vr_basis, sizeof n.basis);   // consumed: the mod sets it again for the next frame
+    g_vr_basis[0] = g_vr_basis[1] = g_vr_basis[2] = 0.0f; g_vr_basis[3] = 1.0f;
     return &n;
 }
 static const float k_ident[12] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
@@ -337,10 +350,115 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
 }
 
 // a save state was loaded: captures from before belong to another game
+// ---- VR: the scenes of the last two world frames, drawn again per eye ----------------------------
+static Capture g_vsnap[2];          // [0] the frame before, [1] the newest
+static u32 g_vsnap_seq;
+static double g_vsnap_time, g_vsnap_dt = 0.04;
+double plat_time();
+bool level3d_vr_snapshot(u32 slot_addr) {
+    slot_addr &= 0x1FFFFF;
+    Capture* cap = nullptr;
+    for (auto& c : g_cap)
+        if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && (!cap || c.seq > cap->seq)) cap = &c;
+    if (!cap) return false;
+    if (cap->seq == g_vsnap_seq && g_vsnap[1].valid) return true;
+    g_vsnap[0] = std::move(g_vsnap[1]);
+    g_vsnap[1] = *cap;
+    g_vsnap_seq = cap->seq;
+    double now = plat_time();
+    double dt = now - g_vsnap_time;
+    if (dt > 0.01 && dt < 0.2) g_vsnap_dt = g_vsnap_dt * 0.8 + dt * 0.2;
+    g_vsnap_time = now;
+    return true;
+}
+bool level3d_vr_cam(VrCamInfo& o) {
+    const Capture& c = g_vsnap[1];
+    if (!c.valid) return false;
+    o.h = c.cam.h; o.ofx = c.cam.ofx; o.ofy = c.cam.ofy; o.sx = c.cam.sx; o.sy = c.cam.sy;
+    memcpy(o.basis, c.basis, sizeof o.basis);
+    return true;
+}
+// t < 0: from the time since the newest frame arrived (0 = the frame before, 1 = the newest)
+void level3d_vr_emit(float t, const VrEyeXf& xf, int cx1, int cy1, int cx2, int cy2) {
+    const Capture& cur = g_vsnap[1];
+    const Capture& prv = g_vsnap[0];
+    if (!cur.valid || !n3_available()) return;
+    if (t < 0.0f) t = (float)((plat_time() - g_vsnap_time) / g_vsnap_dt);
+    t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+    Camera cam = cur.cam;
+    bool mix = prv.valid && t < 1.0f;
+    if (mix) {
+        float d = fabsf(cam.eye[0] - prv.cam.eye[0]) + fabsf(cam.eye[1] - prv.cam.eye[1]) + fabsf(cam.eye[2] - prv.cam.eye[2]);
+        if (d < 2000.0f) lerp_cam(prv.cam, cur.cam, t, cam);
+        else mix = false;
+    }
+    static std::vector<std::array<float, 12>> gm;
+    gm.resize(cur.groups.size());
+    size_t li = 0;
+    for (size_t gi = 0; gi < cur.groups.size(); gi++) {
+        const Group& g = cur.groups[gi];
+        float* M = gm[gi].data();
+        memcpy(M, g.M, sizeof g.M);
+        if (mix && g.key) {
+            const Group* p = nullptr;
+            size_t n = prv.groups.size();
+            for (size_t k = 0; k < n && !p; k++) {
+                const Group& q = prv.groups[(li + k) % n];
+                if (q.key == g.key) { p = &q; li = (li + k + 1) % n; }
+            }
+            if (p && fabsf(p->M[9] - M[9]) + fabsf(p->M[10] - M[10]) + fabsf(p->M[11] - M[11]) < 1500.0f)
+                for (int i = 0; i < 12; i++) M[i] = p->M[i] + (M[i] - p->M[i]) * t;
+        }
+    }
+    N3View v = {};
+    v.h = xf.hy;
+    v.ws_scale = xf.hx / xf.hy;
+    v.ofx = xf.cx;
+    v.ofy = xf.cy;
+    v.off_x = 0;
+    v.off_y = 0;
+    v.clip_x1 = cx1; v.clip_y1 = cy1; v.clip_x2 = cx2; v.clip_y2 = cy2;
+    v.znear = 4.0f;
+    v.zfar = 0.0f;
+    float isx = 1.0f / cam.sx, isy = 1.0f / cam.sy;
+    bool has_sky = false;
+    for (const Group& g : cur.groups) if (g.kind == GK_SKY && g.count) has_sky = true;
+    n3_begin(v);
+    for (int pass = has_sky ? 0 : 1; pass < 2; pass++) {
+        if (pass == 1 && has_sky) { n3_end(); n3_begin(v); }
+        for (const LvTri& tr : cur.tris) {
+            int g0 = tr.v[0].g;
+            int kind = g0 >= 0 ? cur.groups[g0].kind : GK_NORMAL;
+            if ((kind == GK_SKY) != (pass == 0)) continue;
+            float bias = g0 >= 0 ? cur.groups[g0].bias : 0.0f;
+            N3Vtx o[3];
+            for (int i = 0; i < 3; i++) {
+                const LvVtx& lv = tr.v[i];
+                float p[3] = {lv.x, lv.y, lv.z}, w[3], q[3];
+                if (lv.g < 0) view_of(cam, p, q);
+                else if (kind == GK_SKY) {   // at infinity: the camera's rotation only
+                    xform(gm[lv.g].data(), p, w);
+                    for (int k = 0; k < 3; k++) q[k] = cam.R[k * 3] * w[0] + cam.R[k * 3 + 1] * w[1] + cam.R[k * 3 + 2] * w[2];
+                } else { xform(gm[lv.g].data(), p, w); view_of(cam, w, q); }
+                q[0] *= isx; q[1] *= isy;   // true camera space
+                float d[3] = {q[0], q[1], q[2]};
+                if (kind != GK_SKY) for (int k = 0; k < 3; k++) d[k] -= xf.pos[k];
+                float e[3];
+                for (int k = 0; k < 3; k++) e[k] = xf.R[k * 3] * d[0] + xf.R[k * 3 + 1] * d[1] + xf.R[k * 3 + 2] * d[2];
+                if (bias != 0.0f) for (int k = 0; k < 3; k++) e[k] *= 1.0f - bias;
+                o[i] = N3Vtx{e[0], e[1], e[2], lv.u, lv.v, lv.rgb};
+            }
+            n3_tri(o, tr.m);
+        }
+    }
+    n3_end();
+}
+
 void level3d_reset() {
     for (auto& c : g_cap) c.valid = false;
     g_last_ok = false;
     g_last_groups.clear();
+    g_vsnap[0].valid = g_vsnap[1].valid = false;
 }
 
 // ---- MeshFX effect meshes (80086810; see re/notes_models.md) ---------------------------------

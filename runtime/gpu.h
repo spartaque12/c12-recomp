@@ -47,6 +47,14 @@ struct GpuBackend {
     void (*target)(int which);   // 0 = VRAM, 1 = in-between frame layer (null if unsupported)
 };
 
+// Extra targets of the D3D11 renderer (VR): 2 / 3 = eyes, 4 / 5 = HUD over black / white, 6 = cinema. Select one
+// with GpuBackend::target(which) after hw_xtarget_begin() has mapped a VRAM display area onto it.
+bool hw_xtarget_make(int which, int w, int h);
+void hw_xtarget_begin(int which, int x, int y, int w, int h, const float rgba[4]);
+void hw_xtarget_remap(int x, int y, int w, int h);   // the bound extra target shows another VRAM area
+void* hw_xtarget_texture(int which);                 // ID3D11Texture2D*
+void hw_xtarget_copy_display(int which, const struct GpuDisplay& d);
+
 extern GpuBackend g_sw_backend;
 extern GpuBackend g_hw_backend;
 bool hw_backend_init();

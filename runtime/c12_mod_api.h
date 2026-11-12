@@ -22,13 +22,28 @@
 #pragma once
 #include <stdint.h>
 
-#define C12_MOD_API_VERSION 3   /* check api->version >= the version your mod was written for */
+#define C12_MOD_API_VERSION 4   /* check api->version >= the version your mod was written for */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef void (*C12OrigFn)(uint32_t* regs);
+
+/* VR (version 4). Poses are in the headset's tracking space as OpenXR has it: x right, y up, -z ahead,
+ * metres; q = rotation quaternion x, y, z, w. */
+typedef struct C12VrPose { float q[4]; float p[3]; } C12VrPose;
+/* One eye: its pose and its field of view as tangents (left and down negative). */
+typedef struct C12VrView { C12VrPose eye; float tan_left, tan_right, tan_up, tan_down; } C12VrView;
+/* What vr_render drew (ID3D11Texture2D*, RGBA8 UNORM, on d3d11_device()); valid until the next call. */
+typedef struct C12VrImages {
+    void* eye[2];             /* the 3D view per eye (scene == 1), eye_w x eye_h */
+    void* hud_black;          /* the HUD over black and over white (hud_w x hud_h): colour = hud_black, */
+    void* hud_white;          /*   coverage = 1 - (hud_white - hud_black) */
+    void* cinema;             /* the window's picture (menus, loading screens, films), cinema_w x cinema_h */
+    int scene;                /* 1: eyes and HUD drawn; 0: no 3D view now (show the cinema picture) */
+    int eye_w, eye_h, hud_w, hud_h, cinema_w, cinema_h;
+} C12VrImages;
 typedef void (*C12HookFn)(uint32_t* regs, C12OrigFn orig);
 
 typedef struct C12ModApi {
@@ -73,6 +88,23 @@ typedef struct C12ModApi {
     /* Called right after a save state was loaded (the game's RAM and registers are those of the
      * saved moment; a mod's own variables are not): drop anything remembered from before. */
     void (*on_state_loaded)(void (*cb)(void));
+    /* ---- version 4: VR ---- */
+    void* (*d3d11_device)(void);   /* ID3D11Device* of the renderer (null with the software renderer) */
+    /* Frame pacing: the runtime calls wait_until(t) instead of sleeping until time t (time_now() clock,
+     * seconds) before each of the game's frames; it must return once t has passed. Null = the runtime's own. */
+    void (*set_pacer)(void (*wait_until)(double t));
+    double (*time_now)(void);
+    /* Draw the last world frame for two eyes (each eye_w x eye_h), the HUD and the window's picture.
+     * units_per_metre: game units per metre (the hero is about 330 units tall). Returns images->scene. */
+    int (*vr_render)(const C12VrView eyes[2], float units_per_metre, int eye_w, int eye_h, C12VrImages* images);
+    /* The head pose, for other mods (a first-person mod looks where the head looks): set by the VR mod each
+     * frame (null = no headset), read with vr_get_head (0 = none). */
+    void (*vr_set_head)(const C12VrPose* head);
+    int (*vr_get_head)(C12VrPose* head);
+    /* The head orientation the game camera of this frame was built from (a first-person mod that turned
+     * the camera with the head); call before the frame is drawn. Default: identity (the head only looks
+     * around the game camera). */
+    void (*vr_set_basis)(const float q[4]);
 } C12ModApi;
 
 #ifdef __cplusplus
