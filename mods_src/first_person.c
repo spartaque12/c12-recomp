@@ -34,6 +34,9 @@ static const C12ModApi* api;
 static int enabled = 1;
 static float fov = 1.25f;          /* field-of-view multiplier while the mod is on */
 static float eye_up = 300.0f;      /* eye height above the feet, game units (the hero is ~330 tall) */
+static float crouch_drop = 95.0f;  /* how much lower the eye is while crouching (his head drops ~95) */
+static float cur_drop;             /* the drop now: eases toward crouch_drop / 0 */
+#define ACT_CROUCH 0x40000000u     /* hero action flag (*(hero+0xb0)+0x10): crouching (Circle) */
 static float eye_fwd = 0.0f;
 static int hide_body = 1;
 static int direct_look = 1;        /* mouse turns the view directly, no camera easing */
@@ -270,8 +273,15 @@ static void apply(void) {
         vm_d[i] = r16(vo + 0x0c + i * 6 + 2) / 4096.0f;
         vm_f[i] = r16(vo + 0x0c + i * 6 + 4) / 4096.0f;
     }
+    /* crouching (Circle) lowers the head: the eye follows, eased over a few frames */
+    if (frame_pass) {
+        uint32_t ac = (uint32_t)r32(hero + 0xb0);
+        float want = (is_ptr(ac) && (r32(ac + 0x10) & ACT_CROUCH)) ? crouch_drop : 0.0f;
+        cur_drop += (want - cur_drop) * 0.3f;
+        if (cur_drop - want < 0.5f && want - cur_drop < 0.5f) cur_drop = want;
+    }
     for (int i = 0; i < 3; i++) vm_eye[i] = (float)r32(hero + 0x28 + i * 4) + vm_f[i] * eye_fwd;
-    vm_eye[1] -= eye_up;
+    vm_eye[1] -= eye_up - cur_drop;
     api->set_aim_origin(1, (int)vm_eye[0], (int)vm_eye[1], (int)vm_eye[2]);
     /* only for drawing: the game logic keeps its own camera position (see render_hook) */
     if (in_render) {
@@ -480,12 +490,13 @@ static void sfx_hook(uint32_t* r, C12OrigFn orig) {
     orig(r);
 }
 
-/* The hero's action flags (*(hero+0xb0)+0x10): only low bits while standing or running; climbing a
- * wall or ladder (0x04000000), vaulting onto something (0x00400000) and pushing a crate (0x10000000) set
- * high ones. In those the game steers him itself (relative to the wall or crate), so the mod keeps out. */
+/* The hero's action flags (*(hero+0xb0)+0x10): only low bits while standing or running, plus 0x40000000
+ * while crouching; climbing a wall or ladder (0x04000000), vaulting onto something (0x00400000) and
+ * pushing a crate (0x10000000) set other high ones. In those the game steers him itself (relative to the
+ * wall or crate), so the mod keeps out. */
 static int on_foot(uint32_t hero) {
     uint32_t c = (uint32_t)r32(hero + 0xb0);
-    return !is_ptr(c) || (r32(c + 0x10) & 0xffff0000u) == 0;
+    return !is_ptr(c) || (r32(c + 0x10) & 0xffff0000u & ~ACT_CROUCH) == 0;
 }
 
 /* 8001dea0 steers the current object (800efdc8) towards the target angle at *(obj+0x9c)+0x1a. For
@@ -574,6 +585,7 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->mod_info("First person", "Play from the hero's eyes with the normal controls. No scope overlay, no scope sound.", &enabled);
     api->setting_float("fov", "Field of view (1 = original)", &fov, 0.7f, 2.0f);
     api->setting_float("eye_up", "Eye height", &eye_up, 150.0f, 450.0f);
+    api->setting_float("crouch_drop", "Eye drop when crouching", &crouch_drop, 0.0f, 200.0f);
     api->setting_float("eye_fwd", "Eye forward / back", &eye_fwd, -150.0f, 150.0f);
     api->setting_bool("direct_look", "Direct mouse look (no camera easing)", &direct_look);
     api->setting_bool("strafe", "Keep looking where you aim while moving (strafe)", &strafe);
