@@ -74,12 +74,16 @@ C = L2, Enter = Start, G = Select. XInput pads work at the same time (analog sti
 * Widescreen: HUD and menu elements are re-proportioned and anchored automatically (`hud_fix`); 2D effects drawn
   inside the 3D scene (not through the HUD layer) are still stretched.
 * Polygon seams are closed by PGXP; in classic view (PGXP off) the original seams are visible, as on the console.
-* Level geometry (walls, floors) is drawn natively (`runtime/level3d.cpp` on the 3D path in `gpu3d.h`): the faces
-  are read from the level data and drawn as real 3D triangles with a depth buffer, per-pixel perspective and
-  near-plane clipping, instead of the game's screen-space projection and subdivision. Models, effects and the HUD
-  still go through the PS1 path; their 3D polygons are depth-tested against the level. Options: `level3d=0` (the
-  game's own level renderer), `n3_depth_ps1=0`, `n3_ps1_bias=0.01`. For the remaining PS1 geometry, polygons
-  reaching behind the eye are kept and clipped (`near_keep`, `near_clip`).
+* Native 3D renderer (remastered view; `runtime/level3d.cpp` on the 3D path in `gpu3d.h`): the level geometry,
+  every object model (hero, enemies, weapons, doors, crates: per-part matrices, the game's lighting and fog) and
+  the effect meshes are read from the game's data and drawn as real 3D triangles with a depth buffer,
+  per-pixel perspective and near-plane clipping, instead of the game's screen-space projection, subdivision and
+  sort order. In-between frames re-project them with the camera and every object part halfway between two
+  frames. What still goes through the PS1 path (sky, shadows, decals, sprites, lines, HUD) is depth-tested
+  against it: 3D polygons at their own depth, flat world primitives at the depth of their sort slot. Classic
+  view uses the game's own renderer. Options: `level3d=0` (off; also in the menu), `n3_parts` (debug mask:
+  1 level, 2 effects, 4 objects), `n3_depth_ps1=0`, `n3_ps1_bias=0.01`. For the remaining PS1 geometry,
+  polygons reaching behind the eye are kept and clipped (`near_keep`, `near_clip`).
 * `texpage-*` and `vram-write-*` replacement images are not used (only `texupload-*`).
 * Mask-bit test (rarely used GPU feature) is not implemented in the D3D11 renderer.
 * Debug: `--headless --hw --frames N --shots DIR --every K --input script.txt` runs scripted tests.

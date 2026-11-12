@@ -32,10 +32,12 @@
 #include "gpu3d.h"
 #include "savestate.h"
 #include <vector>
+#include <array>
 #include <math.h>
 #include <string.h>
 
 int g_level3d = 1;   // option level3d: 0 = the game's own level renderer
+int g_n3_parts = 7;  // option n3_parts (debug): native 1 level, 2 effect meshes, 4 objects
 
 extern float g_ws_scale, g_fov_mult;
 
@@ -44,7 +46,7 @@ static inline u16 rd16(u32 a) { u16 v; memcpy(&v, g_ram + (a & 0x1FFFFF), 2); re
 static inline s16 rds16(u32 a) { return (s16)rd16(a); }
 static inline bool ptr_ok(u32 p) { return (p >> 24) == 0x80 && (p & 0x1FFFFF) < RAM_SIZE; }
 
-struct LvVtx { float x, y, z; float u, v; u32 rgb; };   // world space (level) or the group's model space
+struct LvVtx { float x, y, z; float u, v; u32 rgb; int g = -1; };   // g < 0: world space (level), else model space of group g
 struct LvTri { LvVtx v[3]; N3Mat m; };
 struct Camera { float R[9]; float eye[3]; float h, ofx, ofy; };
 // A group of triangles sharing one model->world transform (the level: identity). Moving objects are
@@ -110,8 +112,7 @@ static Group& group_begin(Capture& cap, uint64_t key, const float M[12]) {
 }
 static void group_end(Capture& cap) {
     Group& g = cap.groups.back();
-    g.count = (u32)cap.tris.size() - g.first;
-    if (!g.count) cap.groups.pop_back();
+    g.count = (u32)cap.tris.size() - g.first;   // kept even if empty: other groups' triangles may use its vertices
 }
 
 // Hook body for 8006737c (a0 = POLY chunk). Returns false if the game's own routine must run.
@@ -270,10 +271,14 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
     v.znear = 4.0f;
     v.zfar = 0.0f;
     n3_begin(v);
+    // every group's transform for this picture (blended with last frame's for the in-between frame)
+    static std::vector<std::array<float, 12>> gm;
+    gm.resize(cap->groups.size());
     size_t li = 0;   // last frame's groups come mostly in the same order: search on from the last hit
-    for (const Group& g : cap->groups) {
-        float M[12];
-        memcpy(M, g.M, sizeof M);
+    for (size_t gi = 0; gi < cap->groups.size(); gi++) {
+        const Group& g = cap->groups[gi];
+        float* M = gm[gi].data();
+        memcpy(M, g.M, sizeof g.M);
         if (mix && g.key) {
             const Group* p = nullptr;
             size_t n = g_last_groups.size();
@@ -284,18 +289,17 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
             if (p && fabsf(p->M[9] - M[9]) + fabsf(p->M[10] - M[10]) + fabsf(p->M[11] - M[11]) < 1500.0f)
                 for (int i = 0; i < 12; i++) M[i] = (M[i] + p->M[i]) * 0.5f;
         }
-        bool ident = g.key == 0;
-        for (u32 ti = g.first; ti < g.first + g.count; ti++) {
-            const LvTri& t = cap->tris[ti];
-            N3Vtx o[3];
-            for (int i = 0; i < 3; i++) {
-                float p[3] = {t.v[i].x, t.v[i].y, t.v[i].z}, w[3], q[3];
-                if (ident) view_of(cam, p, q);
-                else { xform(M, p, w); view_of(cam, w, q); }
-                o[i] = N3Vtx{q[0], q[1], q[2], t.v[i].u, t.v[i].v, t.v[i].rgb};
-            }
-            n3_tri(o, t.m);
+    }
+    for (const LvTri& t : cap->tris) {
+        N3Vtx o[3];
+        for (int i = 0; i < 3; i++) {
+            const LvVtx& lv = t.v[i];
+            float p[3] = {lv.x, lv.y, lv.z}, w[3], q[3];
+            if (lv.g < 0) view_of(cam, p, q);
+            else { xform(gm[lv.g].data(), p, w); view_of(cam, w, q); }
+            o[i] = N3Vtx{q[0], q[1], q[2], lv.u, lv.v, lv.rgb};
         }
+        n3_tri(o, t.m);
     }
     n3_end();
     if (!interp) { g_last_cam = cap->cam; g_last_ok = true; g_last_groups = cap->groups; cap->drawn = true; }
@@ -334,7 +338,8 @@ static u32 dpc(u32 c, int ir0, const s16 fc[3]) {   // GTE DPCS: c + IR0 * (FC -
 static int g_fx_native, g_fx_mixed, g_fx_ps1, g_fx_frame;
 static void fx_count(int* k) {
     if (g_frame / 250 != g_fx_frame) {
-        if (g_fx_native + g_fx_mixed + g_fx_ps1) logf("meshfx frames %d..: native %d, mixed %d, PS1 %d\n", g_fx_frame * 250, g_fx_native, g_fx_mixed, g_fx_ps1);
+        extern int g_dbg_frame;
+        if (g_dbg_frame >= 0 && g_fx_native + g_fx_mixed + g_fx_ps1) logf("meshfx frames %d..: native %d, mixed %d, PS1 %d\n", g_fx_frame * 250, g_fx_native, g_fx_mixed, g_fx_ps1);
         g_fx_frame = g_frame / 250; g_fx_native = g_fx_mixed = g_fx_ps1 = 0;
     }
     (*k)++;
@@ -347,7 +352,7 @@ bool meshfx_capture(Ctx* c, RecompFn orig) {
 }
 // 0 = not handled (the original runs), 1 = drawn natively, 2 = native + the rest through the original
 static int meshfx_do(Ctx* c, RecompFn orig) {
-    if (!scene3d_enabled()) return 0;
+    if (!scene3d_enabled() || !(g_n3_parts & 2)) return 0;
     u32 obj = c->r[4], view = c->r[5];
     if (!ptr_ok(obj) || view != rd32(0x800efde0)) return 0;
     u32 fl = rd32(obj + 0xc);
@@ -450,7 +455,7 @@ static int meshfx_do(Ctx* c, RecompFn orig) {
         for (int i = 0; i < n; i++) {
             u16 uv = rd16(f + 0x18 + 2 * i);
             u32 rgb = dpc(col[(type & 8) ? i : 0], ir0, fc);
-            L[i] = LvVtx{P[i][0], P[i][1], P[i][2], (float)(uv & 0xff), (float)(uv >> 8), rgb};
+            L[i] = LvVtx{P[i][0], P[i][1], P[i][2], (float)(uv & 0xff), (float)(uv >> 8), rgb, (int)cap.groups.size() - 1};
         }
         cap.tris.push_back(LvTri{{L[0], L[1], L[2]}, m});
         if (n == 4) cap.tris.push_back(LvTri{{L[1], L[3], L[2]}, m});
@@ -462,5 +467,266 @@ static int meshfx_do(Ctx* c, RecompFn orig) {
         for (u32 f : mine) g_ram[(f + 1) & 0x1FFFFF] &= ~0x40;
         return 2;
     }
+    return 1;
+}
+
+// ---- PT_MODEL objects (800b8cb4; see re/notes_models_other.md) -------------------------------
+// The hero, enemies, weapons, doors, crates, props: rigid parts, each with its own world matrix (built
+// by the game in 800a2fd0), drawn by small per-polygon-type drivers that project, cull, light (GTE
+// NCDS/NCDT: BK + LCM * light directions in part space, fogged by the depth-cue curve) and sort.
+// Here the same records are read and lit on the CPU; each part becomes one group keyed (model, part)
+// so the in-between frame blends every part's own motion. Instances with a private sub-ordering-table,
+// vertex morphing (MIME) or a polygon type not handled here go through the game's drivers instead.
+u32 mem_r32_slow(Ctx* c, u32 a);
+static int g_pm_native, g_pm_ps1, g_pm_frame, g_pm_why;
+
+struct PmLight {
+    float L[9];          // light directions (rows), world space
+    float LLM0[9];       // the GTE's LLM as found (groups that do not move the lights into part space)
+    float LCM[9];        // light colours (columns per light)
+    float BK[3];         // ambient, 1.0 = 4096
+    float FC[3];         // fog colour (0..255)
+    float dqa, dqb, h;   // depth cue: IR0 = DQB + DQA * H / z
+    float flat[3];       // flat colour (flat / unlit mode)
+};
+
+static inline float s16f(u32 w, int hi) { return (float)(s16)(hi ? (w >> 16) : (w & 0xffff)); }
+
+static void read_mat3(Ctx* c, int r0, float o[9]) {   // GTE control registers r0..r0+4: 3x3 s16, packed
+    u32 w[5];
+    for (int i = 0; i < 5; i++) w[i] = gte_cfc2(c, r0 + i);
+    float v[9] = {s16f(w[0], 0), s16f(w[0], 1), s16f(w[1], 0), s16f(w[1], 1), s16f(w[2], 0), s16f(w[2], 1), s16f(w[3], 0), s16f(w[3], 1), s16f(w[4], 0)};
+    for (int i = 0; i < 9; i++) o[i] = v[i] / 4096.0f;
+}
+
+// colour of one vertex: RGBC * (BK + LCM * clamp0(LLM * n)) (or * flat colour), then toward the fog colour
+static u32 pm_colour(const PmLight& lt, u32 rgbc, const float* LLM, const float n[3], bool flat, float z) {
+    float ir[3];
+    if (flat) { ir[0] = lt.flat[0]; ir[1] = lt.flat[1]; ir[2] = lt.flat[2]; }
+    else {
+        float l[3];
+        for (int i = 0; i < 3; i++) l[i] = fmaxf(0.0f, LLM[i * 3] * n[0] + LLM[i * 3 + 1] * n[1] + LLM[i * 3 + 2] * n[2]);
+        for (int i = 0; i < 3; i++) ir[i] = fminf(fmaxf(lt.BK[i] + lt.LCM[i * 3] * l[0] + lt.LCM[i * 3 + 1] * l[1] + lt.LCM[i * 3 + 2] * l[2], 0.0f), 7.999f);
+    }
+    float t = 0.0f;
+    if (z > 0.0f) t = (lt.dqb + lt.dqa * fminf(lt.h * 65536.0f / z, 131071.0f)) / 16777216.0f;   // IR0 / 4096
+    t = fminf(fmaxf(t, 0.0f), 1.0f);
+    u32 o = 0;
+    for (int ch = 0; ch < 3; ch++) {
+        float cc = (float)((rgbc >> (8 * ch)) & 0xff) * ir[ch];
+        cc = cc + (lt.FC[ch] - cc) * t;
+        int iv = (int)cc;
+        iv = iv < 0 ? 0 : iv > 255 ? 255 : iv;
+        o |= (u32)iv << (8 * ch);
+    }
+    return o;
+}
+
+static int ptmodel_do(Ctx* c);
+bool ptmodel_capture(Ctx* c) {
+    int r = ptmodel_do(c);
+    if (scene3d_enabled()) {
+        if (g_frame / 250 != g_pm_frame) {
+            extern int g_dbg_frame;
+            if (g_dbg_frame >= 0 && g_pm_native + g_pm_ps1) logf("models frames %d..: native %d, PS1 %d\n", g_pm_frame * 250, g_pm_native, g_pm_ps1);
+            g_pm_frame = g_frame / 250;
+            g_pm_native = g_pm_ps1 = 0;
+        }
+        (r ? g_pm_native : g_pm_ps1)++;
+        extern int g_dbg_frame;
+        if (!r && g_pm_ps1 == 1 && g_dbg_frame >= 0) logf("models: PS1 fallback, reason %d (model %08x)\n", g_pm_why, c->r[4]);
+    }
+    return r != 0;
+}
+
+// Hook body for 800b8cb4 (a0 = model, a1 = instance, a2 = view, a3 = cull mode). 0 = the original must run.
+static int ptmodel_do(Ctx* c) {
+    if (!scene3d_enabled() || !(g_n3_parts & 4)) { g_pm_why = 1; return 0; }
+    u32 model = c->r[4], inst = c->r[5], view = c->r[6];
+    if (!ptr_ok(model) || !ptr_ok(inst) || view != rd32(0x800efde0)) { g_pm_why = 2; return 0; }
+    if (rd16(inst + 0x34) != 0) { g_pm_why = 3; return 0; }                       // private sub-ordering-table
+    u32 src = rd32(model + 0x28), pstate = rd32(model + 0x20), coords = rd32(model + 0x24);
+    if (!ptr_ok(src) || !ptr_ok(pstate) || !ptr_ok(coords) || rd32(src) != 0x33305453) { g_pm_why = 4; return 0; }   // 'ST03'
+    u32 sparts = rd32(src + 8);
+    int nparts = rd16(model + 0x1c), ncoords = rd16(model + 0x1e);
+    if (!ptr_ok(sparts) || nparts <= 0 || nparts > 64) { g_pm_why = 5; return 0; }
+    u32 mflags = rd32(model + 0xc), iflags = rd32(inst + 0xc);
+    u16 srcflags = rd16(src + 4);
+
+    PmLight lt;
+    for (int i = 0; i < 9; i++) lt.L[i] = (float)(s16)(mem_r32_slow(c, 0x1f800020 + (i & ~1) * 2) >> ((i & 1) * 16)) / 4096.0f;
+    read_mat3(c, 8, lt.LLM0);
+    read_mat3(c, 16, lt.LCM);
+    for (int i = 0; i < 3; i++) lt.BK[i] = (float)(s32)gte_cfc2(c, 13 + i) / 4096.0f;
+    for (int i = 0; i < 3; i++) lt.FC[i] = (float)(s32)gte_cfc2(c, 21 + i) / 16.0f;
+    lt.h = (float)(gte_cfc2(c, 26) & 0xffff);
+    lt.dqa = (float)(s16)gte_cfc2(c, 27);
+    lt.dqb = (float)(s32)gte_cfc2(c, 28);
+    u32 f88 = mem_r32_slow(c, 0x1f800088), f8c = mem_r32_slow(c, 0x1f80008c);
+    lt.flat[0] = s16f(f88, 0) / 4096.0f; lt.flat[1] = s16f(f88, 1) / 4096.0f; lt.flat[2] = s16f(f8c, 0) / 4096.0f;
+
+    Capture* cp = scene_cap();
+    if (!cp) { g_pm_why = 6; return 0; }
+    Capture& cap = *cp;
+    const Camera& cam = cap.cam;
+    size_t tri0 = cap.tris.size(), grp0 = cap.groups.size();
+    auto give_up = [&]() { cap.tris.resize(tri0); cap.groups.resize(grp0); return 0; };
+    float zlim = (float)rd16(view + 0x6c) * 8.0f;   // the game keeps slots 2..len-1 (z >> 3)
+
+    struct Slot { float p[3]; int g; };
+    static Slot slot[256];       // the drivers' vertex scratch: position in the space of the part that loaded it
+    for (auto& sl : slot) sl.g = -2;
+    float LLM[9];
+    memcpy(LLM, lt.LLM0, sizeof LLM);
+    for (int pi = 0; pi < nparts; pi++) {
+        u32 s = pstate + 0x10u * pi, p = sparts + 0x14u * pi;
+        u16 sflags = rd16(s);
+        if (sflags & 2) continue;                                // hidden part
+        int ngroups = rd16(p + 4), gi = rd16(s + 2);
+        if (gi >= ngroups) continue;
+        u32 groups = rd32(p + 0x10);
+        if (!ptr_ok(groups)) continue;
+        u32 g = groups + 0x1cu * gi;
+        int ci = g_ram[(p + 6) & 0x1FFFFF];
+        if (ci >= ncoords) continue;
+        if ((mflags & 0x80) && (sflags & 1) && rd16(s + 6) != 0) return (g_pm_why = __LINE__, give_up());   // vertex morph (MIME)
+        u32 C = coords + 0x70u * ci;
+        float M[12];
+        s32 t[3];
+        rd_matrix(C + 0x30, M, t);
+        for (int i = 0; i < 3; i++) M[9 + i] = (float)t[i];
+        u16 gflags = rd16(g);
+        bool part_space_lights = (gflags & 1) && !((iflags | sflags) & 0x20) && !(srcflags & 0x40);
+        // light directions into part space (L x C.rot); other groups keep whatever the GTE holds, i.e.
+        // the last lit part's
+        if (part_space_lights)
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++) LLM[i * 3 + j] = lt.L[i * 3] * M[j] + lt.L[i * 3 + 1] * M[3 + j] + lt.L[i * 3 + 2] * M[6 + j];
+        u32 arrA = rd32(g + 0xc), arrB = rd32(g + 0x10), ibuf = rd32(s + 0xc);
+        u32 d8 = (u32)rd16(p + 8) + rd16(p + 0xa);
+        u32 nbase = arrB;
+        uint64_t key = (1ull << 63) | ((uint64_t)model << 8) | (u32)pi;
+        group_begin(cap, key, M);
+        u32 blk = rd32(g + 0x14);
+        int nblocks = rd16(g + 8);
+        for (int b = 0; b < nblocks && ptr_ok(blk); b++) {
+            int id = rd16(blk), cnt = rd16(blk + 2);
+            u16 bflags = rd16(blk + 4), bsize = rd16(blk + 6);
+            u32 fl = iflags | sflags | bflags;
+            bool flat = (fl & 0x20) || (srcflags & 0x40);
+            u32 r = blk + 8;
+            // record sizes and the game's drivers (9 / 0xa, per-vertex colour without texture: not handled)
+            static const int rsize[13] = {8, 0xc, 0xc, 0x18, 0x18, 0x10, 0x10, 0x1c, 0x20, 0x18, 0x1c, 0x24, 0x2c};
+            static const u32 drv[13] = {0x800b9320, 0x800aa160, 0x800aa57c, 0x800a8d74, 0x800a91c0, 0x800aa350, 0x800aa7a4, 0x800a8f7c, 0x800a9408, 0, 0, 0x800a8738, 0x800a8a0c};
+            u32 dt = rd32(inst + 0x30), de = (ptr_ok(dt) && id < 13) ? rd32(dt + 4u * id) : 0;
+            if (id >= 13 || !drv[id] || !ptr_ok(de) || rd32(de + 4) != drv[id]) { group_end(cap); return (g_pm_why = 1000 + id, give_up()); }
+            for (int k = 0; k < cnt; k++, r += rsize[id]) {
+                u32 w0 = rd32(r), w1 = rd32(r + 4);
+                if (id == 0) {   // vertices into the scratch slots
+                    int type = w0 & 0xffff, si = w0 >> 16, dst = w1 & 0xffff, n = w1 >> 16;
+                    u32 a;
+                    switch (type & 3) {
+                    case 0: a = arrA; break;
+                    case 1: a = ibuf; break;
+                    case 2: a = ibuf + d8 * 8; break;
+                    default: a = arrB; break;
+                    }
+                    if (type >= 4) { nbase = a; continue; }
+                    if (!ptr_ok(a)) { group_end(cap); return (g_pm_why = __LINE__, give_up()); }
+                    for (int v = 0; v < n && dst + v < 256; v++) {
+                        u32 va = a + 8u * (si + v);
+                        Slot& sl = slot[dst + v];
+                        sl.p[0] = rds16(va); sl.p[1] = rds16(va + 2); sl.p[2] = rds16(va + 4);
+                        sl.g = (int)cap.groups.size() - 1;
+                    }
+                    continue;
+                }
+                bool quad = (id & 1) == 0, tex = id == 3 || id == 4 || id == 7 || id == 8 || id == 11 || id == 12, gour = id >= 5;
+                u32 rgbcv[4] = {w1 & 0xffffff, w1 & 0xffffff, w1 & 0xffffff, w1 & 0xffffff};   // 0xb / 0xc: one per vertex
+                if (id >= 11) for (int i = 0; i < 4; i++) rgbcv[i] = rd32(r + 4 + 4 * i) & 0xffffff;
+                int nv = quad ? 4 : 3;
+                int vi[4] = {(int)(w0 & 0xff), (int)((w0 >> 8) & 0xff), (int)((w0 >> 16) & 0xff), (int)(w0 >> 24)};
+                // normal slot per vertex
+                int ni[4] = {0, 0, 0, 0};
+                u32 w2 = rd32(r + 8), w3 = rd32(r + 12);
+                switch (id) {
+                case 1: case 2: ni[0] = ni[1] = ni[2] = ni[3] = w2 & 0xffff; break;
+                case 3: ni[0] = ni[1] = ni[2] = rd32(r + 20) & 0xffff; break;
+                case 4: ni[0] = ni[1] = ni[2] = ni[3] = rd16(r + 0x16); break;
+                case 5: ni[0] = w2 & 0xffff; ni[1] = w2 >> 16; ni[2] = w3 & 0xffff; break;
+                case 6: ni[0] = w2 & 0xffff; ni[1] = w2 >> 16; ni[2] = w3 & 0xffff; ni[3] = w3 >> 16; break;
+                case 7: { u32 w5 = rd32(r + 20), w6 = rd32(r + 24); ni[0] = w5 & 0xffff; ni[1] = w5 >> 16; ni[2] = w6 & 0xffff; break; }
+                case 8: { u32 w5 = rd32(r + 20), w6 = rd32(r + 24), w7 = rd32(r + 28); ni[0] = w5 >> 16; ni[1] = w6 & 0xffff; ni[2] = w6 >> 16; ni[3] = w7 & 0xffff; break; }
+                case 11: ni[0] = rd16(r + 0x1c); ni[1] = rd16(r + 0x1e); ni[2] = rd16(r + 0x20); break;
+                case 12: ni[0] = rd16(r + 0x22); ni[1] = rd16(r + 0x24); ni[2] = rd16(r + 0x26); ni[3] = rd16(r + 0x28); break;
+                }
+                (void)gour;
+                float P[4][3], V[4][3];
+                int pg[4];
+                bool unset = false;
+                for (int i = 0; i < nv; i++) {
+                    const Slot& sl = slot[vi[i]];
+                    if (sl.g < 0) { unset = true; break; }
+                    memcpy(P[i], sl.p, sizeof P[i]);
+                    pg[i] = sl.g;   // a joint's vertices may come from the previous part (its own matrix)
+                    float w[3];
+                    xform(cap.groups[sl.g].M, P[i], w);
+                    view_of(cam, w, V[i]);
+                }
+                if (unset) continue;
+                // the game's depth range (average z, as AVSZ3/AVSZ4)
+                float zs = 0;
+                for (int i = 0; i < nv; i++) zs += V[i][2];
+                zs /= nv;
+                if (zs >= zlim) continue;
+                float zmax = V[0][2];
+                for (int i = 1; i < nv; i++) zmax = fmaxf(zmax, V[i][2]);
+                if (zmax <= 0.0f) continue;
+                if (!(fl & 8)) {   // back faces (NCLIP: a quad is kept if either half faces front)
+                    auto front = [&](int a, int bb, int d) {
+                        const float *A = V[a], *B = V[bb], *D = V[d];
+                        return A[0] * (B[1] * D[2] - B[2] * D[1]) - A[1] * (B[0] * D[2] - B[2] * D[0]) + A[2] * (B[0] * D[1] - B[1] * D[0]) >= 0;
+                    };
+                    if (quad ? !(front(1, 2, 0) || front(2, 0, 3)) : !front(0, 1, 2)) continue;
+                }
+                N3Mat m = {};
+                m.textured = tex;
+                m.semi = ((w1 >> 24) & 2) || (fl & 0x10);
+                float uv[4][2] = {};
+                if (tex) {
+                    int uo = id == 11 ? 0x10 : id == 12 ? 0x14 : 8;   // uv0|clut, uv1|tpage, uv2 (, uv3)
+                    u32 u0 = rd32(r + uo), u1 = rd32(r + uo + 4), u2 = rd32(r + uo + 8);
+                    u16 clut = u0 >> 16, tpage = u1 >> 16;
+                    u16 uvs[4] = {(u16)u0, (u16)u1, (u16)u2, 0};
+                    if (id == 4) uvs[3] = (u16)(u2 >> 16);
+                    if (id == 8) uvs[3] = (u16)rd32(r + 20);
+                    if (id == 12) uvs[3] = rd16(r + 0x20);
+                    for (int i = 0; i < nv; i++) { uv[i][0] = (float)(uvs[i] & 0xff); uv[i][1] = (float)(uvs[i] >> 8); }
+                    m.blend = (tpage >> 5) & 3;
+                    m.depth = (tpage >> 7) & 3;
+                    if (m.depth > 2) m.depth = 2;
+                    m.tpx = (tpage & 15) * 64;
+                    m.tpy = ((tpage >> 4) & 1) * 256;
+                    m.clutx = (clut & 63) * 16;
+                    m.cluty = (clut >> 6) & 0x1ff;
+                }
+                LvVtx L[4];
+                u32 rgbc = w1 & 0xffffff;
+                for (int i = 0; i < nv; i++) {
+                    u32 na = nbase + 8u * ni[i];
+                    float n[3] = {rds16(na) / 4096.0f, rds16(na + 2) / 4096.0f, rds16(na + 4) / 4096.0f};
+                    u32 col = pm_colour(lt, rgbcv[i], LLM, n, flat, V[i][2]);
+                    L[i] = LvVtx{P[i][0], P[i][1], P[i][2], uv[i][0], uv[i][1], col, pg[i]};
+                }
+                if (!gour && !flat) for (int i = 1; i < nv; i++) L[i].rgb = L[0].rgb;   // flat-shaded types: one colour
+                { extern int g_dbg_frame; if (g_dbg_frame == g_frame) logf("pm part %d blk %d id %d fl %x rgbc %06x v %d,%d,%d,%d n %d,%d,%d,%d col %06x %06x %06x z %.0f vy %.0f tex %d semi %d tp %d,%d clut %d,%d uv %.0f,%.0f %.0f,%.0f %.0f,%.0f\n", pi, b, id, fl, rgbc, vi[0], vi[1], vi[2], vi[3], ni[0], ni[1], ni[2], ni[3], L[0].rgb, L[1].rgb, L[2].rgb, zs, V[0][1], m.textured, m.semi, m.tpx, m.tpy, m.clutx, m.cluty, uv[0][0], uv[0][1], uv[1][0], uv[1][1], uv[2][0], uv[2][1]); }
+                cap.tris.push_back(LvTri{{L[0], L[1], L[2]}, m});
+                if (quad) cap.tris.push_back(LvTri{{L[1], L[3], L[2]}, m});
+            }
+            blk += bsize ? bsize : (8 + cnt * rsize[id]);
+        }
+        group_end(cap);
+    }
+    g_ram[(inst + 0xc) & 0x1FFFFF] |= 4;   // "drawn this frame", as the original does
     return 1;
 }

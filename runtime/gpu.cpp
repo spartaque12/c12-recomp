@@ -305,6 +305,14 @@ static bool g_in_list;
 static bool g_list_had_3d;  // the list being replayed contained tracked 3D polygons
 static bool g_list_3d;     // the display list being drawn is the world (large ordering table)
 
+// View depth of the ordering-table slot being drawn (world list only; 0 = none). The game sorts with
+// slot = z >> 3; the front-most slots hold 2D overlays (scope frame), which get none.
+extern float g_prim_depth;
+static float slot_depth() {
+    int game_slot = g_ot_slots_cur - 1 - g_ot_index;
+    return (g_list_3d && g_ot_slots_cur >= 1024 && game_slot >= 8) ? (float)(game_slot * 8) : 0.0f;
+}
+
 static void draw_polygon() {
     u32 cmd = g_fifo[0] >> 24;
     bool gouraud = cmd & 0x10, quad = cmd & 0x08, tex = cmd & 0x04;
@@ -463,8 +471,13 @@ static void draw_polygon() {
         return x1 - x0 > 1023 || y1 - y0 > 511;
     };
     bool keep_big = pg_kind == 1 || pg_kind == 2;
+    // A flat primitive among the world's polygons (a sprite, a glow, a screen-built effect quad) has no
+    // depth of its own. On the console the sort order hid it behind nearer geometry; with native
+    // geometry drawn first it would show through walls and characters: test it at its slot's depth.
+    g_prim_depth = all ? 0.0f : slot_depth();
     if (keep_big || !oversize(v)) g_be->tri(v, g_st);
     if (quad && (keep_big || !oversize(v + 1))) g_be->tri(v + 1, g_st);
+    g_prim_depth = 0.0f;
 }
 
 static void draw_rect() {
@@ -502,7 +515,9 @@ static void draw_rect() {
         if (!tex && !(cmd & 2) && w >= 500 && h == 32 && (scope_now || g_frame - g_scope_seen <= 1)) { g_scope_seen = g_frame; return; }
         if (!tex && (cmd & 2) && w >= 500 && h >= 150 && g_frame - g_scope_seen <= 1) return;
     }
+    g_prim_depth = slot_depth();
     g_be->rect(x, y, w, h, uv & 0xFF, (uv >> 8) & 0xFF, g_fifo[0] & 0xFFFFFF, g_st);
+    g_prim_depth = 0.0f;
 }
 
 
@@ -529,10 +544,14 @@ static void draw_line_seg(const GpuVtx& a, const GpuVtx& b, bool gouraud, bool s
         GpuVtx a2 = a, b2 = b;
         a2.y += (int)g_st.ys; a2.py += g_st.ys; b2.y += (int)g_st.ys; b2.py += g_st.ys;
         a2.x += (int)g_st.xs_dx; a2.px += g_st.xs_dx; b2.x += (int)g_st.xs_dx; b2.px += g_st.xs_dx;
+        g_prim_depth = slot_depth();
         g_be->line(a2, b2, g_st);
+        g_prim_depth = 0.0f;
         return;
     }
+    g_prim_depth = slot_depth();
     g_be->line(a, b, g_st);
+    g_prim_depth = 0.0f;
 }
 
 static int cmd_len(u32 cmd) {

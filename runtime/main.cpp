@@ -43,6 +43,7 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k == "load_state") { extern std::string g_state_file; g_state_file = v; }
     else if (k == "state_file") { extern std::string g_state_file; g_state_file = v; }
     else if (k == "save_state_at") { extern int g_state_save_frame; g_state_save_frame = atoi(v.c_str()); }
+    else if (k == "n3_parts") { extern int g_n3_parts; g_n3_parts = atoi(v.c_str()); }
     else if (k == "level3d") { extern int g_level3d; g_level3d = atoi(v.c_str()); }
     else if (k == "near_keep") { extern int g_near_keep; g_near_keep = atoi(v.c_str()); }
     else if (k == "near_keep_fn") {   // comma separated guest function addresses (hex)

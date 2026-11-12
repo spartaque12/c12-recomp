@@ -59,6 +59,7 @@ static ID3D11DepthStencilView* dsv[2];
 static ID3D11DepthStencilState* ds_state[3];
 static int depth_frame[2] = {-1000, -1000};   // g_frame (vblank count) at the last n3_begin on that target
 int g_n3_depth_ps1 = 1;
+float g_prim_depth;   // > 0: view depth of a flat (2D) primitive of the world list, from its sort slot
 float g_n3_ps1_bias = 0.01f;   // option n3_ps1_bias
 int g_n3_selftest = 0;
 char g_bb_shot[512];   // when set, the next present writes the back buffer here
@@ -375,7 +376,9 @@ static void hw_tri(const GpuVtx* v, const GpuState& s) {
     if (hd) { lim[0] = (float)hd->u0; lim[1] = (float)hd->v0; lim[2] = 1.0f / hd->w; lim[3] = 1.0f / hd->h; }
     if (s.xs_k != 1.0f) { int a = (int)floorf(XS(s, (float)minx)), b = (int)ceilf(XS(s, (float)maxx)); minx = std::min(a, b); maxx = std::max(a, b); }
     // 3D polygons (PGXP depth on every vertex) are hidden behind native geometry drawn this frame
-    int dm = (g_n3_depth_ps1 && precise3 && depth_valid()) ? DM_TEST : DM_OFF;
+    // so are flat primitives of the world list (sprites, glows), at the depth of their sort slot
+    bool slotd = !precise3 && g_prim_depth > 0.0f;
+    int dm = (g_n3_depth_ps1 && (precise3 || slotd) && depth_valid()) ? DM_TEST : DM_OFF;
     begin_prim(s, kind_of(s) | dm << 3, 3, minx, miny, maxx + 1, maxy + 1, hd ? hd->srv : nullptr);
     for (int i = 0; i < 3; i++) {
         Vtx& o = verts[nverts++];
@@ -385,7 +388,7 @@ static void hw_tri(const GpuVtx* v, const GpuState& s) {
         o.w = (precise && g_cfg.persp) ? v[i].pw : 1.0f;
         // NDC depth K / pw, the native mapping, pulled toward the eye by g_n3_ps1_bias: shadows and decals
         // lie exactly on the (native) floor and walls, the game only moved them forward in its sort order
-        o.z = precise ? N3_DEPTH_K * o.w / (v[i].pw * (1.0f - g_n3_ps1_bias)) : 0.0f;
+        o.z = precise ? N3_DEPTH_K * o.w / (v[i].pw * (1.0f - g_n3_ps1_bias)) : slotd ? N3_DEPTH_K / g_prim_depth : 0.0f;
         u32 col = s.gouraud ? v[i].rgb : v[0].rgb;
         if (s.textured && s.raw) col = 0x808080;
         o.color = col | 0xFF000000u;
@@ -414,12 +417,14 @@ static void hw_rect(int x, int y, int w, int h, int u, int v, u32 rgb, const Gpu
     const HdSub* hd = (s.textured && u + w <= 256 && v + h <= 256) ? hdtex_lookup(s, u, v, u + w - 1, v + h - 1) : nullptr;
     if (hd) { lim[0] = (float)hd->u0; lim[1] = (float)hd->v0; lim[2] = 1.0f / hd->w; lim[3] = 1.0f / hd->h; }
     float fx1 = XS(s, (float)x), fx2 = XS(s, (float)(x + w));
-    begin_prim(s, kind_of(s), 6, (int)floorf(fx1), y, (int)ceilf(fx2), y + h, hd ? hd->srv : nullptr);
+    int dm = (g_n3_depth_ps1 && g_prim_depth > 0.0f && depth_valid()) ? DM_TEST : DM_OFF;   // world sprite
+    begin_prim(s, kind_of(s) | dm << 3, 6, (int)floorf(fx1), y, (int)ceilf(fx2), y + h, hd ? hd->srv : nullptr);
     if (s.textured && s.raw) rgb = 0x808080;
     int first = nverts;
     // u/v wrap inside the 256 page: split not needed for typical sprites; the shader masks to 8 bits
     quad(fx1, (float)y, fx2, (float)(y + h), (float)u, (float)v, (float)(u + w), (float)(v + h), rgb, s, lim);
     if (hd) for (int i = first; i < nverts; i++) verts[i].fl[0] |= 512 | (hd->stp ? 1024 : 0);
+    if (dm) for (int i = first; i < nverts; i++) verts[i].z = N3_DEPTH_K / g_prim_depth;
 }
 
 static void hw_line(const GpuVtx& a, const GpuVtx& b, const GpuState& s) {
@@ -432,14 +437,15 @@ static void hw_line(const GpuVtx& a, const GpuVtx& b, const GpuState& s) {
     nx = -dy / len * 0.5f; ny = dx / len * 0.5f;
     float ex = dx / len * 0.5f, ey = dy / len * 0.5f;
     float lim[4] = {0, 0, 255, 255};
-    begin_prim(s, kind_of(s), 6, (int)std::min(axf, bxf) - 1, std::min(a.y, b.y) - 1, (int)std::max(axf, bxf) + 2, std::max(a.y, b.y) + 2);
+    int dm = (g_n3_depth_ps1 && g_prim_depth > 0.0f && depth_valid()) ? DM_TEST : DM_OFF;   // world line
+    begin_prim(s, kind_of(s) | dm << 3, 6, (int)std::min(axf, bxf) - 1, std::min(a.y, b.y) - 1, (int)std::max(axf, bxf) + 2, std::max(a.y, b.y) + 2);
     float ax = axf + 0.5f - ex, ay = a.y + 0.5f - ey, bx = bxf + 0.5f + ex, by = b.y + 0.5f + ey;
     const float px[6] = {ax + nx, bx + nx, ax - nx, bx + nx, bx - nx, ax - nx};
     const float py[6] = {ay + ny, by + ny, ay - ny, by + ny, by - ny, ay - ny};
     const u32 pc[6] = {a.rgb, b.rgb, a.rgb, b.rgb, b.rgb, a.rgb};
     for (int i = 0; i < 6; i++) {
         Vtx& o = verts[nverts++];
-        o.x = px[i]; o.y = py[i]; o.z = 0; o.w = 1;
+        o.x = px[i]; o.y = py[i]; o.z = dm ? N3_DEPTH_K / g_prim_depth : 0.0f; o.w = 1;
         o.color = (s.gouraud ? pc[i] : a.rgb) | 0xFF000000u;
         o.u = o.v = 0;
         fill_attr(o, s, lim);

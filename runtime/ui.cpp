@@ -187,7 +187,7 @@ static void draw_menu() {
             b = g_cfg.widescreen; if (ImGui::Checkbox("Widescreen 16:9 (true field of view)", &b)) { g_cfg.widescreen = b; changed = true; }
             b = g_hud_fix; if (ImGui::Checkbox("Keep HUD and menus in proportion", &b)) g_hud_fix = b;
             { extern int g_level3d; b = g_level3d; if (ImGui::Checkbox("Native 3D renderer (real depth buffer, no wobble)", &b)) g_level3d = b; }
-            ImGui::SameLine(); ImGui::TextDisabled("(level geometry; remastered only)");
+            ImGui::SameLine(); ImGui::TextDisabled("(level, characters, objects, effects; remastered only)");
             b = g_cfg.pgxp; if (ImGui::Checkbox("PGXP sub-pixel precision (no wobble, no seams)", &b)) { g_cfg.pgxp = b; changed = true; }
             b = g_cfg.persp; if (ImGui::Checkbox("Perspective-correct texturing", &b)) g_cfg.persp = b;
             b = g_cfg.hd_enabled; if (ImGui::Checkbox("HD texture pack", &b)) g_cfg.hd_enabled = b;

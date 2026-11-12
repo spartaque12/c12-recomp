@@ -282,6 +282,10 @@ static void hook_level_draw(Ctx* c, RecompFn orig) {
     if (!level3d_capture(c)) orig(c);   // captured: drawn natively when its display list is drawn
 }
 bool meshfx_capture(Ctx* c, RecompFn orig);
+bool ptmodel_capture(Ctx* c);
+static void hook_ptmodel_draw(Ctx* c, RecompFn orig) {
+    if (!ptmodel_capture(c)) orig(c);   // objects: drawn natively (level3d.cpp)
+}
 static void hook_meshfx_draw(Ctx* c, RecompFn orig) {
     if (!meshfx_capture(c, orig)) orig(c);
 }
@@ -488,6 +492,7 @@ void game_init() {
     hook_set(0x800612b8, hook_relocate);
     hook_set(0x8006737c, hook_level_draw);
     hook_set(0x80086810, hook_meshfx_draw);
+    hook_set(0x800b8cb4, hook_ptmodel_draw);
     hook_set(0x800a1128, hook_vsync_wait);
     g_main_fibre.live = true;
     g_cs = g_main_fibre.cs;
