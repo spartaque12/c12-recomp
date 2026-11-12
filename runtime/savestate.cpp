@@ -29,7 +29,7 @@ int mods_module_list(void** bases, int max);
 CoStack* game_main_stack();
 
 static const u32 MAGIC = 0x53323143;   // "C12S"
-static const u32 VERSION = 1;
+static const u32 VERSION = 2;
 enum { REQ_NONE, REQ_SAVE, REQ_LOAD };
 static int g_req;
 static std::string g_req_path;
@@ -54,6 +54,7 @@ struct Ident {
     uint64_t stacks = 0;                 // where the coroutine stacks are
     u32 nmods = 0;
     uint64_t mods[16] = {};
+    u32 mod_stamp[16] = {}, mod_size[16] = {};   // which build of each mod (stacks can return into them)
 };
 static Ident ident_now() {
     Ident id;
@@ -66,7 +67,12 @@ static Ident ident_now() {
     id.stacks = (uint64_t)co_slot_lo(0);
     void* b[16];
     id.nmods = (u32)mods_module_list(b, 16);
-    for (u32 i = 0; i < id.nmods; i++) id.mods[i] = (uint64_t)b[i];
+    for (u32 i = 0; i < id.nmods; i++) {
+        id.mods[i] = (uint64_t)b[i];
+        IMAGE_NT_HEADERS* mn = (IMAGE_NT_HEADERS*)((u8*)b[i] + ((IMAGE_DOS_HEADER*)b[i])->e_lfanew);
+        id.mod_stamp[i] = mn->FileHeader.TimeDateStamp;
+        id.mod_size[i] = mn->OptionalHeader.SizeOfImage;
+    }
     return id;
 }
 
@@ -112,6 +118,7 @@ static int read_state(const std::string& path, std::string& why) {
     if (id.exe_stamp != now.exe_stamp || id.exe_size != now.exe_size) { fclose(f); why = "save state from another build of c12.exe"; return 1; }
     if (id.exe_base != now.exe_base || id.stacks != now.stacks) { fclose(f); why = "save state from a run with a different memory layout"; return 1; }
     if (id.nmods != now.nmods || memcmp(id.mods, now.mods, sizeof id.mods)) { fclose(f); why = "save state made with other mods loaded (or at other addresses)"; return 1; }
+    if (memcmp(id.mod_stamp, now.mod_stamp, sizeof id.mod_stamp) || memcmp(id.mod_size, now.mod_size, sizeof id.mod_size)) { fclose(f); why = "save state made with another build of a mod"; return 1; }
     all_state(s);
     fclose(f);
     return s.ok ? 0 : 2;

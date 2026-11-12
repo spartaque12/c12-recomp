@@ -83,6 +83,8 @@ static int32_t r32(uint32_t a) { int32_t v; memcpy(&v, api->ram + (a & 0x1FFFFF)
 static void w16(uint32_t a, int v) { int16_t s = (int16_t)v; memcpy(api->ram + (a & 0x1FFFFF), &s, 2); }
 static void w32(uint32_t a, int32_t v) { memcpy(api->ram + (a & 0x1FFFFF), &v, 4); }
 static int scope_open(void) { return (r32(0x800efdfc) & 0x400) || r16(0x800f0ca4) == 1; }
+/* manning a gun turret: the game looks through the turret with its own vision overlay (800f0ca4 = 2 then) */
+static int turret_mode(void) { return (r32(0x800efdfc) & 0x200) != 0; }
 static int is_ptr(uint32_t p) { return p >= 0x80010000u && p < 0x80200000u && (p & 3) == 0; }
 
 /* an object's model instance, or 0 */
@@ -195,6 +197,7 @@ static void apply(void) {
         uint32_t st = (uint32_t)r32(hero + 0xbc);
         if ((r32(0x800efdfc) & 0x80) || (is_ptr(st) && (r16(st + 0x108) & 0x40))) cutscene = 1;
         if (!scope && r32(0x800f1338) == 1) cutscene = 1;
+        if (turret_mode()) cutscene = 1;
     }
     if (enabled && scope && !cutscene) {
         if (!in_scope) {
@@ -368,7 +371,7 @@ static void camera_hook(uint32_t* r, C12OrigFn orig) {
     /* the game updates more than one camera per frame; only the one that follows the hero is ours */
     if (!is_ptr(hero) || !is_ptr(vo) || (uint32_t)r32(cam + 0x44) != hero + 0x14) { orig(r); return; }
     g_cam = cam;
-    int active = enabled && direct_look && !scope_open() && (uint32_t)r32(vo + 4) == cam;
+    int active = enabled && direct_look && !scope_open() && !turret_mode() && (uint32_t)r32(vo + 4) == cam;
     if (active) {
         if (!look_valid) {
             look_yaw = (float)(r16(cam + 0x22) & 0xfff);
@@ -410,7 +413,7 @@ static void camera_hook(uint32_t* r, C12OrigFn orig) {
 }
 
 static void draw_hook(uint32_t* r, C12OrigFn orig) {
-    api->game_option("scope_overlay", enabled && clean_scope ? 0 : 1);
+    api->game_option("scope_overlay", enabled && clean_scope && !turret_mode() ? 0 : 1);
     apply();
     orig(r);
 }
