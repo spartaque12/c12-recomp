@@ -64,8 +64,13 @@ static void view_of(const Camera& c, const float p[3], float o[3]) {
 }
 
 // Hook body for 8006737c (a0 = POLY chunk). Returns false if the game's own routine must run.
+bool settings_is_classic();
 bool level3d_capture(Ctx* c) {
-    if (!g_level3d || !n3_available()) return false;
+    if (!g_level3d || !n3_available() || settings_is_classic()) {   // classic view: the game's own renderer
+        if (n3_available()) n3_invalidate();                        // PS1 polygons stop testing against stale depth
+        for (auto& cp : g_cap) cp.valid = false;
+        return false;
+    }
     u32 view = rd32(0x800efde0), poly = c->r[4];
     if (!ptr_ok(view) || !ptr_ok(poly)) return false;
     u32 faces = rd32(poly + 0x10), verts = rd32(poly + 0x14), uvtab = rd32(poly + 0x18), mats = rd32(0x800f00cc);

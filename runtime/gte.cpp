@@ -125,7 +125,9 @@ int g_near_log = -1;          // debug: log near vertices per guest function at 
 extern "C" { extern u32* g_cs; extern int g_cs_n; }
 #include <map>
 static std::map<u32, int> g_near_count;
+bool settings_is_classic();
 static bool near_keep_here() {
+    if (settings_is_classic()) return false;   // classic view: near polygons dropped as on the console
     if (g_near_keep == 1) return true;
     if (g_near_keep != 2 || g_cs_n <= 0) return false;
     u32 f = g_cs[(g_cs_n - 1) & 4095];
