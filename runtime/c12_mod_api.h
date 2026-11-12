@@ -22,7 +22,7 @@
 #pragma once
 #include <stdint.h>
 
-#define C12_MOD_API_VERSION 4   /* check api->version >= the version your mod was written for */
+#define C12_MOD_API_VERSION 5   /* check api->version >= the version your mod was written for */
 
 #ifdef __cplusplus
 extern "C" {
@@ -105,6 +105,26 @@ typedef struct C12ModApi {
      * the camera with the head); call before the frame is drawn. Default: identity (the head only looks
      * around the game camera). */
     void (*vr_set_basis)(const float q[4]);
+    /* ---- version 5: VR controllers ---- */
+    /* A second controller pressed together with the player's own (motion controllers): PSX button bits as
+     * in pad() and the sticks (-128..127, x right, y down; 0 = centred). Held until the next call; dropped
+     * when not renewed for 0.2 s. A strong left stick also presses the direction buttons (menus). */
+    void (*pad_inject)(uint32_t buttons, int lx, int ly, int rx, int ry);
+    /* Turn the view as the mouse would (game angle units, 4096 per turn, + = right / down). */
+    void (*turn)(float yaw, float pitch);
+    /* A pose of the headset's tracking space (a hand) in the game world of the last drawn frame: position
+     * (game units) and axes as columns right, down, forward (row-major 3x3). 0 before the first VR frame. */
+    int (*vr_to_world)(const C12VrPose* tracking, float pos[3], float rot[9]);
+    /* With "aim_to_view": shots start at `origin` (world) and go along rot's forward column, set = 0 to aim
+     * at the view centre again. */
+    void (*set_aim_ray)(int set, const float origin[3], const float rot[9]);
+    /* A laser beam drawn in the headset from `from` (tracking space, -z ahead) length_m metres ahead,
+     * stopped by walls; on = 0 hides it. rgb = 0x00BBGGRR. */
+    void (*vr_set_beam)(int on, const C12VrPose* from, float length_m, uint32_t rgb);
+    /* Hand poses (0 left, 1 right; the controller's grip, tracking space) for other mods, like the head:
+     * set by the VR mod each frame (null = not tracked), read with vr_get_hand (0 = none). */
+    void (*vr_set_hand)(int hand, const C12VrPose* pose);
+    int (*vr_get_hand)(int hand, C12VrPose* pose);
 } C12ModApi;
 
 #ifdef __cplusplus

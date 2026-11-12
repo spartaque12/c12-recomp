@@ -2,7 +2,8 @@
 // from the VCS-Recomp VR.asi layer): the loader (openxr_loader.dll next to the mod DLL, loaded at run time), an instance
 // with XR_KHR_D3D11_enable, the head-mounted display's system, a session on an existing D3D11 device, the reference
 // spaces (VIEW, LOCAL and a recentred LOCAL), swapchains and the frame loop (xrWaitFrame / xrBeginFrame / xrEndFrame)
-// with a projection layer (mono or stereo) and quad layers. Main thread only.
+// with a projection layer (mono or stereo) and quad layers, and motion-controller input (an action set: syncInput,
+// haptic). Main thread only.
 //
 // Stereo: each frame after waitAndBegin(), locateViews() gives the two eyes' poses and fields of view at the predicted
 // display time in the recentred space; render eye i with views[i] into panelImage(eyePanel(i), ...) and hand the same
@@ -116,6 +117,35 @@ namespace vr
     int64_t panelFormat(Panel panel);
     // xrEndFrame with the layers (projection first, quads in order); none when shouldRender is false.
     void endFrame(const ProjectionLayer &projection, const QuadLayer *quads, int quadCount);
+
+    // ---- motion controllers ----------------------------------------------------------------------------------------
+    // One action set ("c12": grip pose, aim pose, trigger, squeeze, thumbstick, thumbstick click, primary, secondary,
+    // menu, haptic), created and bound once per instance and attached to each session when it is created. Suggested
+    // bindings: oculus/touch_controller, valve/index_controller, htc/vive_controller, microsoft/motion_controller,
+    // khr/simple_controller, and hp/mixed_reality_controller when the runtime offers XR_EXT_hp_mixed_reality_controller.
+    struct Hand
+    {
+        bool active = false; // the controller is bound and its grip pose tracked (buttons are read whenever bound)
+        Pose grip;           // the hand holding the controller (recentred space, predicted display time)
+        Pose aim;            // the pointing ray: its -z is where the controller points
+        float trigger = 0.0f, squeeze = 0.0f; // 0..1 (a squeeze click on Vive / WMR: 0 or 1)
+        float stick[2] = {0.0f, 0.0f};        // -1..1, x right, y up (Vive: the trackpad)
+        bool stickClick = false;
+        // primary / secondary: A / B on the right hand, X / Y on the left (Touch, HP); Index: A / B on both hands;
+        // Vive / WMR: trackpad click / menu; simple controller: none (select -> trigger, menu -> menu)
+        bool primary = false, secondary = false;
+        bool menu = false; // Touch / HP: the left menu button; Vive / WMR / simple: menu (Index: none)
+    };
+    // Sync the actions and read both hands (index 0 = left, 1 = right). Call after waitAndBegin(): the poses are at the
+    // predicted display time in the same recentred space as locateHead / locateViews. False, with inactive hands, when
+    // there is no input (no frame begun, the session not focused - the runtime's dashboard, another app - or the
+    // runtime has no action support).
+    bool syncInput(Hand out[2]);
+    // Vibrate a hand's controller (0 left, 1 right): amplitude 0..1 (0 stops it), for `seconds` (<= 0: the runtime's
+    // shortest pulse). Focused sessions only.
+    void haptic(int hand, float amplitude, float seconds);
+    // The hand's current interaction profile path ("/interaction_profiles/oculus/touch_controller"), "" when none.
+    std::string interactionProfile(int hand);
 
     // statistics
     uint64_t framesSubmitted();

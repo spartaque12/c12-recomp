@@ -266,6 +266,7 @@ void plat_input_poll() {
             }
         }
     } else if (!(down & (1u << 9))) g_aim_mx = g_aim_my = 0;
+    { extern void vr_pad_merge(u32& down, u8 ax[4]); u32 d32 = down; vr_pad_merge(d32, ax); down = (u16)d32; }
     g_user_buttons = down;
     memcpy(g_user_axes, ax, 4);
     if (g_pad_forward == 1) {   // a mod steers the movement itself: the game sees "run straight forward"

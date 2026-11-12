@@ -413,6 +413,8 @@ int g_aim_fix = 1;   // debug switch (aim_fix=0 disables)
 
 int g_aim_to_view;   // set by mods while their own first-person view is active
 int g_aim_origin_set, g_aim_origin[3];   // where those shots start (the mod's eye), if set
+int g_aim_ray_set;                        // VR: shots along a controller instead of the view centre
+double g_aim_ray_org[3], g_aim_ray_rot[9];   // origin (world) and axes (columns right, down, forward)
 static void log_shot(Ctx* c, u32 obj, const char* tag) {
     if (g_log_level < 3) return;
     u32 st = mem_r32(c, obj + 0xbc);
@@ -440,20 +442,29 @@ static void fire_aimed(Ctx* c, RecompFn orig, double fwd) {
     for (int i = 0; i < 9; i++) rot[i] = (u16)mem_r16(c, obj + 0x14 + i * 2);
     for (int i = 0; i < 3; i++) pos[i] = mem_r32(c, obj + 0x28 + i * 4);
     double m[9], off[3];
-    for (int i = 0; i < 9; i++) { m[i] = (s16)mem_r16(c, vo + 0x0c + i * 2) / 4096.0; mem_w16(c, obj + 0x14 + i * 2, mem_r16(c, vo + 0x0c + i * 2)); }
+    for (int i = 0; i < 9; i++) {
+        m[i] = g_aim_ray_set ? g_aim_ray_rot[i] : (s16)mem_r16(c, vo + 0x0c + i * 2) / 4096.0;
+        mem_w16(c, obj + 0x14 + i * 2, (u16)(s16)lround(m[i] * 4096.0));
+    }
+    double org[3];
+    for (int i = 0; i < 3; i++) org[i] = g_aim_ray_set ? g_aim_ray_org[i] : g_aim_origin_set ? g_aim_origin[i] : (s32)mem_r32(c, vo + 0x20 + i * 4);
     for (int k = 0; k < 3; k++) off[k] = (s16)mem_r16(c, st + k * 2);   // muzzle, in the gun's own space
     for (int i = 0; i < 3; i++) {
-        double eye = (g_aim_origin_set ? g_aim_origin[i] : (s32)mem_r32(c, vo + 0x20 + i * 4)) + m[i * 3 + 2] * fwd;
+        double eye = org[i] + m[i * 3 + 2] * fwd;
         double mo = m[i * 3 + 0] * off[0] + m[i * 3 + 1] * off[1] + m[i * 3 + 2] * off[2];
         mem_w32(c, obj + 0x28 + i * 4, (u32)(s32)lround(eye - mo));
     }
     // the firing code also uses the view's eye: it is the mod's eye for the duration of the call
     u32 eye_saved[3];
     for (int i = 0; i < 3; i++) eye_saved[i] = mem_r32(c, vo + 0x20 + i * 4);
-    if (g_aim_origin_set) for (int i = 0; i < 3; i++) mem_w32(c, vo + 0x20 + i * 4, (u32)(s32)lround(g_aim_origin[i] + m[i * 3 + 2] * fwd));
+    u16 vrot[9];
+    for (int i = 0; i < 9; i++) vrot[i] = (u16)mem_r16(c, vo + 0x0c + i * 2);
+    if (g_aim_origin_set || g_aim_ray_set) for (int i = 0; i < 3; i++) mem_w32(c, vo + 0x20 + i * 4, (u32)(s32)lround(org[i] + m[i * 3 + 2] * fwd));
+    if (g_aim_ray_set) for (int i = 0; i < 9; i++) mem_w16(c, vo + 0x0c + i * 2, (u16)(s16)lround(m[i] * 4096.0));   // the view looks along the ray for the shot
     orig(c);
     log_shot(c, obj, "(aimed)");
     for (int i = 0; i < 3; i++) mem_w32(c, vo + 0x20 + i * 4, eye_saved[i]);
+    if (g_aim_ray_set) for (int i = 0; i < 9; i++) mem_w16(c, vo + 0x0c + i * 2, vrot[i]);
     if (mem_r32(c, 0x800efdc8) == obj) {
         for (int i = 0; i < 9; i++) mem_w16(c, obj + 0x14 + i * 2, rot[i]);
         for (int i = 0; i < 3; i++) mem_w32(c, obj + 0x28 + i * 4, pos[i]);
@@ -470,8 +481,8 @@ static void hook_shot_target(Ctx* c, RecompFn orig) {
     const u32 vo = 0x800f0110;
     double along = 0, d2 = 0, p[3], f[3];
     for (int i = 0; i < 3; i++) {
-        p[i] = (s16)mem_r16(c, t + 0x44 + i * 2) - (double)g_aim_origin[i];
-        f[i] = (s16)mem_r16(c, vo + 0x0c + i * 6 + 4) / 4096.0;
+        p[i] = (s16)mem_r16(c, t + 0x44 + i * 2) - (g_aim_ray_set ? g_aim_ray_org[i] : (double)g_aim_origin[i]);
+        f[i] = g_aim_ray_set ? g_aim_ray_rot[i * 3 + 2] : (s16)mem_r16(c, vo + 0x0c + i * 6 + 4) / 4096.0;
         along += p[i] * f[i];
     }
     for (int i = 0; i < 3; i++) { double q = p[i] - f[i] * along; d2 += q * q; }

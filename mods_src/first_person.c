@@ -356,9 +356,20 @@ static void place_weapon(uint32_t gun) {
         ax[1][i] = vm_d[i] * cp - f1 * sp;
         ax[2][i] = vm_d[i] * sp + f1 * cp;
     }
+    /* VR with a tracked right controller: the weapon is in the hand, pointing where the controller points */
+    float base[3] = {vm_eye[0] + vm_r[0] * vm_right + vm_d[0] * vm_down + vm_f[0] * vm_fwd,
+                     vm_eye[1] + vm_r[1] * vm_right + vm_d[1] * vm_down + vm_f[1] * vm_fwd,
+                     vm_eye[2] + vm_r[2] * vm_right + vm_d[2] * vm_down + vm_f[2] * vm_fwd};
+    C12VrPose hand;
+    float hp[3], hr[9];
+    if (api->version >= 5 && api->vr_get_hand(1, &hand) && api->vr_to_world(&hand, hp, hr)) {
+        for (int k = 0; k < 3; k++)
+            for (int i = 0; i < 3; i++) ax[k][i] = hr[i * 3 + k];
+        for (int i = 0; i < 3; i++) base[i] = hp[i];
+    }
     uint32_t model = model_of(gun);
     for (int i = 0; i < 3; i++) {
-        int t = (int)(vm_eye[i] + vm_r[i] * vm_right + vm_d[i] * vm_down + vm_f[i] * vm_fwd);
+        int t = (int)base[i];
         for (int k = 0; k < 3; k++) {
             int v = (int)(ax[k][i] * 4096.0f);
             w16(gun + 0x14 + i * 6 + k * 2, v);

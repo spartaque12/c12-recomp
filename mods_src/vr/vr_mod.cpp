@@ -29,6 +29,76 @@ namespace
     float g_render_scale = 1.0f;
     float g_hud_dist = 1.4f, g_hud_width = 1.1f;
     float g_cinema_dist = 2.5f, g_cinema_width = 2.6f;
+    int g_snap_turn = 1;             // right stick: 30 degree snaps (else smooth)
+    float g_snap_deg = 30.0f, g_smooth_speed = 120.0f;   // degrees, degrees per second
+    int g_aim_controller = 1;        // shots along the right controller
+    int g_beam = 1;                  // laser beam from the right controller
+    int g_hud_lazy = 1;              // the HUD follows the head's turn lazily (else fixed to the head)
+    bool g_snapped;                  // the stick returned to centre since the last snap
+    double g_last_frame_t;
+    float g_hud_yaw;                 // the lazy HUD's direction (radians about +y)
+    bool g_hud_yaw_ok;
+    bool g_was_trigger;
+
+    // Motion controllers -> the PSX pad (C-12's controls):
+    //   left stick move (also menus), right stick turn (snap / smooth), right trigger = Cross (fire, accept),
+    //   left trigger = Circle (crouch), right grip = R1 (lock on), left grip = L1 (next weapon),
+    //   A = Square (use), B = Triangle (back), X = R2 (scope view), Y = Select, menu = Start, right stick click = L2
+    void controls(const vr::Hand h[2], double dt)
+    {
+        const vr::Hand &L = h[0], &R = h[1];
+        uint32_t b = 0;
+        if (R.trigger > 0.6f) b |= 1u << 14;
+        if (L.trigger > 0.6f) b |= 1u << 13;
+        if (R.squeeze > 0.6f) b |= 1u << 11;
+        if (L.squeeze > 0.6f) b |= 1u << 10;
+        if (R.primary) b |= 1u << 15;
+        if (R.secondary) b |= 1u << 12;
+        if (L.primary) b |= 1u << 9;
+        if (L.secondary) b |= 1u << 0;
+        if (L.menu || R.menu) b |= 1u << 3;
+        if (R.stickClick) b |= 1u << 8;
+        int lx = L.active ? (int)(L.stick[0] * 127.0f) : 0, ly = L.active ? (int)(-L.stick[1] * 127.0f) : 0;
+        g_api->pad_inject(b, lx, ly, 0, 0);
+        // turning with the right stick
+        float sx = R.active ? R.stick[0] : 0.0f;
+        if (g_snap_turn)
+        {
+            if (fabsf(sx) < 0.3f) g_snapped = false;
+            else if (!g_snapped && fabsf(sx) > 0.7f)
+            {
+                g_snapped = true;
+                g_api->turn((sx > 0 ? 1.0f : -1.0f) * g_snap_deg * (4096.0f / 360.0f), 0.0f);
+            }
+        }
+        else if (fabsf(sx) > 0.2f)
+            g_api->turn(sx * g_smooth_speed * (float)dt * (4096.0f / 360.0f), 0.0f);
+        // a short buzz when the trigger fires
+        bool trig = R.trigger > 0.6f;
+        if (trig && !g_was_trigger) vr::haptic(1, 0.6f, 0.05f);
+        g_was_trigger = trig;
+    }
+
+    // the aim ray and beam from the right controller, the hands for the first-person mod
+    void hands(const vr::Hand h[2])
+    {
+        for (int i = 0; i < 2; i++)
+        {
+            if (!h[i].active) { g_api->vr_set_hand(i, nullptr); continue; }
+            C12VrPose p;
+            memcpy(p.q, h[i].grip.q, sizeof p.q);
+            memcpy(p.p, h[i].grip.p, sizeof p.p);
+            g_api->vr_set_hand(i, &p);
+        }
+        const vr::Hand &R = h[1];
+        C12VrPose aim;
+        memcpy(aim.q, R.aim.q, sizeof aim.q);
+        memcpy(aim.p, R.aim.p, sizeof aim.p);
+        float o[3], rot[9];
+        if (R.active && g_aim_controller && g_api->vr_to_world(&aim, o, rot)) g_api->set_aim_ray(1, o, rot);
+        else g_api->set_aim_ray(0, nullptr, nullptr);
+        g_api->vr_set_beam(R.active && g_beam, &aim, 25.0f, 0x1818b0);
+    }
 
     bool g_on;                // session started (or waiting for the headset)
     double g_retry_at;
@@ -170,6 +240,12 @@ float4 ps_hud(V i) : SV_Target {
         vr::View views[2];
         vr::Pose head;
         bool haveViews = vr::locateViews(views) && vr::locateHead(head);
+        double now = g_api->time_now();
+        double dt = g_last_frame_t > 0 ? now - g_last_frame_t : 0.011;
+        g_last_frame_t = now;
+        vr::Hand hd[2];
+        if (vr::syncInput(hd)) { controls(hd, dt); hands(hd); }
+        else { g_api->set_aim_ray(0, nullptr, nullptr); g_api->vr_set_beam(0, nullptr, 0, 0); g_api->vr_set_hand(0, nullptr); g_api->vr_set_hand(1, nullptr); }
         vr::ProjectionLayer proj;
         vr::QuadLayer quads[2];
         int nq = 0;
@@ -210,7 +286,22 @@ float4 ps_hud(V i) : SV_Target {
                     vr::QuadLayer &q = quads[nq++];
                     q.on = true;
                     q.panel = vr::Panel::Hud;
-                    q.pose = ahead(head, g_hud_dist, 0.0f);
+                    vr::Pose hb = head;
+                    if (g_hud_lazy)
+                    {
+                        // follow the head's turn only once it looks more than 25 degrees away, smoothly;
+                        // the HUD stays level
+                        const float *hq = head.q;
+                        float fx = -2.0f * (hq[0] * hq[2] + hq[1] * hq[3]), fz = -(1.0f - 2.0f * (hq[0] * hq[0] + hq[1] * hq[1]));
+                        float yaw = atan2f(-fx, -fz);
+                        if (!g_hud_yaw_ok) { g_hud_yaw = yaw; g_hud_yaw_ok = true; }
+                        float d = yaw - g_hud_yaw;
+                        while (d > 3.14159265f) d -= 6.28318531f;
+                        while (d < -3.14159265f) d += 6.28318531f;
+                        if (fabsf(d) > 0.44f) g_hud_yaw += (d - (d > 0 ? 0.44f : -0.44f)) * 0.15f + d * 0.02f;
+                        hb.q[0] = 0.0f; hb.q[1] = sinf(g_hud_yaw * 0.5f); hb.q[2] = 0.0f; hb.q[3] = cosf(g_hud_yaw * 0.5f);
+                    }
+                    q.pose = ahead(hb, g_hud_dist, g_hud_lazy ? 0.25f : 0.0f);
                     q.width = g_hud_width;
                     q.height = g_hud_width * 0.75f;   // the game's 4:3 picture
                     q.alpha = true;
@@ -256,6 +347,10 @@ float4 ps_hud(V i) : SV_Target {
             return;
         g_api->set_pacer(nullptr);
         g_api->vr_set_head(nullptr);
+        g_api->set_aim_ray(0, nullptr, nullptr);
+        g_api->vr_set_beam(0, nullptr, 0, 0);
+        g_api->vr_set_hand(0, nullptr);
+        g_api->vr_set_hand(1, nullptr);
         vr::stop();
         g_on = false;
         vr::log("VR off\n");
@@ -286,7 +381,7 @@ float4 ps_hud(V i) : SV_Target {
 
 extern "C" __declspec(dllexport) int c12_mod_init(const C12ModApi *api)
 {
-    if (!api || api->version < 4)
+    if (!api || api->version < 5)
         return 0;
     g_api = api;
     api->mod_info("VR", "OpenXR headset: stereo 3D view, HUD panel, menus on a screen. F8 recentres.", &g_enabled);
@@ -296,6 +391,12 @@ extern "C" __declspec(dllexport) int c12_mod_init(const C12ModApi *api)
     api->setting_float("hud_width", "HUD width (m)", &g_hud_width, 0.4f, 2.5f);
     api->setting_float("cinema_distance", "Screen distance for menus (m)", &g_cinema_dist, 1.0f, 6.0f);
     api->setting_float("cinema_width", "Screen width for menus (m)", &g_cinema_width, 1.0f, 6.0f);
+    api->setting_bool("snap_turn", "Snap turn (right stick; off = smooth)", &g_snap_turn);
+    api->setting_float("snap_degrees", "Snap turn angle", &g_snap_deg, 15.0f, 90.0f);
+    api->setting_float("smooth_speed", "Smooth turn speed (degrees/s)", &g_smooth_speed, 30.0f, 360.0f);
+    api->setting_bool("aim_controller", "Aim with the right controller", &g_aim_controller);
+    api->setting_bool("beam", "Laser beam from the controller", &g_beam);
+    api->setting_bool("hud_lazy", "HUD follows the head lazily (off = fixed to the view)", &g_hud_lazy);
     vr::setLogSink(gameLog);
     api->on_frame(onFrame);
     std::string info;

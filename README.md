@@ -78,7 +78,12 @@ runtime (SteamVR, Oculus/Meta, WMR, Virtual Desktop...). Switch it on in the set
 * Settings (Mods tab): world scale, render scale, HUD and screen distance / width.
 * Testing without a headset: `--vr_test 1` with test screenshots writes both eyes and the HUD; `mods_src\vr\README.md`
   describes the simulated OpenXR runtime (`vr_xr_test_runtime.dll`, captures of what each eye sees).
-* Not yet: motion controllers (the keyboard / mouse / pad play as usual), comfort options (snap turn, vignette).
+* Motion controllers (Touch, Index, Vive, WMR, HP Reverb, simple): left stick move, right stick turn (30 degree
+  snaps or smooth), right trigger fire / accept, left trigger crouch, right grip lock on, left grip next weapon,
+  A use, B back, X scope view, Y Select, menu Start, right stick click look. Shots go where the right controller
+  points (a laser beam shows it, stopped by walls); with the first-person mod the weapon is in your hand. A short
+  rumble on firing. Keyboard / mouse / pad keep working.
+* Comfort: snap or smooth turn, the HUD follows your head lazily (or fixed to the view), all in the Mods tab.
 
 ## Known limitations
 

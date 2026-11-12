@@ -376,8 +376,14 @@ bool level3d_vr_cam(VrCamInfo& o) {
     if (!c.valid) return false;
     o.h = c.cam.h; o.ofx = c.cam.ofx; o.ofy = c.cam.ofy; o.sx = c.cam.sx; o.sy = c.cam.sy;
     memcpy(o.basis, c.basis, sizeof o.basis);
+    memcpy(o.R, c.cam.R, sizeof o.R);
+    memcpy(o.eye, c.cam.eye, sizeof o.eye);
     return true;
 }
+static const N3Vtx* g_vx_v;
+static const N3Mat* g_vx_m;
+static int g_vx_n;
+void level3d_vr_extra(const N3Vtx* v, int ntri, const N3Mat* m) { g_vx_v = v; g_vx_n = ntri; g_vx_m = m; }
 // t < 0: from the time since the newest frame arrived (0 = the frame before, 1 = the newest)
 void level3d_vr_emit(float t, const VrEyeXf& xf, int cx1, int cy1, int cx2, int cy2) {
     const Capture& cur = g_vsnap[1];
@@ -451,6 +457,7 @@ void level3d_vr_emit(float t, const VrEyeXf& xf, int cx1, int cy1, int cx2, int 
             n3_tri(o, tr.m);
         }
     }
+    for (int i = 0; i < g_vx_n; i++) n3_tri(g_vx_v + 3 * i, *g_vx_m);
     n3_end();
 }
 

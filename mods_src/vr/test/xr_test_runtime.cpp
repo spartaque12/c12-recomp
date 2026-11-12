@@ -17,6 +17,17 @@
 // XRTEST_CAPTURE_FORMAT=bmp|png (png). On request: a line "capture <name>" in the control file (XRTEST_CONTROL) or a
 // file <dir>\capture.txt holding a name captures the next frame as eye_<name>_left / _right (and layer_<name>_*),
 // whatever the period; with XRTEST_CAPTURE unset, "capture" writes into the control file's folder.
+//
+// Controllers: the actions (paths, action sets, actions, suggested bindings validated per profile - khr/simple,
+// oculus/touch, valve/index, htc/vive, microsoft/motion, hp/mixed_reality with XR_EXT_hp_mixed_reality_controller,
+// which is offered unless XRTEST_NO_HP_EXT is set -, attach, sync, states, action spaces, haptics, which are logged).
+// The hardware simulated is an oculus/touch_controller pair: a hand has that profile once the application bound
+// something of it there (INTERACTION_PROFILE_CHANGED at the first xrSyncActions); actions are active only while the
+// session is FOCUSED. The hands' poses are in the recentred space (the head at the session's start, or at the last
+// "recenter", yaw only): left (-0.2, -0.3, -0.35), right (0.2, -0.3, -0.35), pointing ahead; aim = grip. Control file:
+//   hand l|r x,y,z[,yaw,pitch,roll]      the grip pose (m, deg)
+//   button l|r trigger|squeeze|stick_click|primary|secondary|menu <0..1>   (primary = X / A, secondary = Y / B)
+//   stick l|r x,y
 #include <windows.h>
 #include <unknwn.h>
 #include <d3d11.h>
@@ -37,6 +48,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -209,11 +221,72 @@ namespace
         std::vector<ID3D11Texture2D *> images;
         uint32_t next = 0, acquired = ~0u, last = ~0u; // last: the most recently released image (~0u: none yet)
     };
+    struct Action;
     struct Space
     {
         XrReferenceSpaceType type = XR_REFERENCE_SPACE_TYPE_LOCAL;
         XrPosef offset = identity();
+        Action *action = nullptr; // an action space (a pose action): follows that hand's controller
+        int hand = 0;             // 0 left, 1 right
     };
+
+    // ---- actions ----------------------------------------------------------------------------------------------------
+    // what a binding path's component is (see componentKind)
+    enum Kind
+    {
+        KNone,
+        KBool,
+        KFloat,
+        KVec,
+        KPose,
+        KHaptic
+    };
+    struct ActionSet
+    {
+        uintptr_t instance = 0;
+        std::string name, localized;
+        uint32_t priority = 0;
+        bool attached = false; // to any session: immutable from then on
+        std::vector<Action *> actions;
+    };
+    struct Binding
+    {
+        XrPath profile = XR_NULL_PATH;
+        int hand = 0;          // 0 left, 1 right
+        std::string component; // under /user/hand/<hand>/, e.g. "input/trigger/value"
+        Kind kind = KNone;
+    };
+    struct Action
+    {
+        ActionSet *set = nullptr;
+        std::string name, localized;
+        XrActionType type = XR_ACTION_TYPE_BOOLEAN_INPUT;
+        std::vector<XrPath> subactions;
+        std::vector<Binding> bindings; // all profiles
+        // the synced state: per hand (0 left, 1 right) and both hands combined (2: subactionPath XR_NULL_PATH)
+        struct State
+        {
+            bool active = false;
+            float v[2] = {0.0f, 0.0f};
+            bool changed = false;
+            XrTime lastChange = 0;
+        } st[3];
+    };
+    std::vector<ActionSet *> g_actionSets; // the live ones (handle checks)
+    std::vector<Action *> g_actions;
+
+    // the simulated oculus/touch_controller pair: pose in the recentred space (x, y, z m; yaw, pitch, roll deg) and
+    // the inputs; the control file's "hand", "button" and "stick" set them
+    struct Controller
+    {
+        float pose[6];
+        float trigger = 0, squeeze = 0, stick[2] = {0, 0}, stickClick = 0, primary = 0, secondary = 0, menu = 0;
+    };
+    Controller g_ctl[2] = {{{-0.2f, -0.3f, -0.35f, 0, 0, 0}}, {{0.2f, -0.3f, -0.35f, 0, 0, 0}}};
+    XrPosef g_handRef = identity(); // the recentred space in LOCAL: the head at the session's start (or "recenter"), yaw only
+    std::vector<std::string> g_paths; // XrPath n: g_paths[n - 1]
+    bool g_hpEnabled = false;         // XR_EXT_hp_mixed_reality_controller enabled by the application
+
     struct Session
     {
         ID3D11Device *device = nullptr;
@@ -224,6 +297,9 @@ namespace
         XrSessionState state = XR_SESSION_STATE_UNKNOWN;
         bool waited = false, begun = false; // the frame loop: xrWaitFrame -> xrBeginFrame -> xrEndFrame
         int64_t predicted = 0;
+        std::vector<ActionSet *> attached; // xrAttachSessionActionSets (once)
+        bool profilesPending = false;      // the interaction profiles get chosen at the next xrSyncActions
+        XrPath profile[2] = {XR_NULL_PATH, XR_NULL_PATH};
     };
 
     std::mutex g_mutex;
@@ -270,8 +346,20 @@ namespace
         rtLog("-> session state %d\n", static_cast<int>(s));
     }
 
+    void resetHandRef(int64_t t);
+    int handArg(const std::string &s) // "l" / "left" -> 0, "r" / "right" -> 1, else -1
+    {
+        if (s == "l" || s == "left")
+            return 0;
+        if (s == "r" || s == "right")
+            return 1;
+        return -1;
+    }
+
     // XRTEST_CONTROL=<file>: one command per line, read and deleted when seen (polled every frame / event poll):
-    //   sleep | wake | unfocus | focus | loss | exit | instance_loss | recenter | hz <n>
+    //   sleep | wake | unfocus | focus | loss | exit | instance_loss | recenter | hz <n> | head y,p,r[,x,y,z] |
+    //   capture <name> | hand l|r x,y,z[,yaw,pitch,roll] | button l|r trigger|squeeze|stick_click|primary|secondary|menu <0..1> |
+    //   stick l|r x,y
     void controlPoll()
     {
         static const char *path = std::getenv("XRTEST_CONTROL");
@@ -345,6 +433,53 @@ namespace
                 e.poseValid = XR_TRUE;
                 e.poseInPreviousSpace = identity();
                 pushEvent(&e, sizeof(e));
+                resetHandRef(nowNs()); // the application recentres on the head now: the hands follow
+            }
+            else if (c.rfind("hand ", 0) == 0 || c.rfind("button ", 0) == 0 || c.rfind("stick ", 0) == 0)
+            {
+                char which[16] = {}, what[32] = {};
+                const char *args = c.c_str() + c.find(' ') + 1;
+                int consumed = 0;
+                if (std::sscanf(args, "%15s %n", which, &consumed) < 1 || handArg(which) < 0)
+                {
+                    rtLog("control: bad hand in \"%s\" (l or r)\n", c.c_str());
+                    continue;
+                }
+                Controller &ctl = g_ctl[handArg(which)];
+                args += consumed;
+                if (c[0] == 'h') // hand l|r x,y,z[,yaw,pitch,roll]
+                {
+                    float p[6] = {};
+                    if (std::sscanf(args, "%f,%f,%f,%f,%f,%f", &p[0], &p[1], &p[2], &p[3], &p[4], &p[5]) < 3)
+                        rtLog("control: \"hand\" needs x,y,z[,yaw,pitch,roll]\n");
+                    else
+                        std::copy(p, p + 6, ctl.pose);
+                }
+                else if (c[0] == 's') // stick l|r x,y
+                {
+                    float x = 0, y = 0;
+                    if (std::sscanf(args, "%f,%f", &x, &y) < 2)
+                        rtLog("control: \"stick\" needs x,y\n");
+                    else
+                        ctl.stick[0] = std::clamp(x, -1.0f, 1.0f), ctl.stick[1] = std::clamp(y, -1.0f, 1.0f);
+                }
+                else // button l|r <name> <value>
+                {
+                    float v = 0;
+                    if (std::sscanf(args, "%31s %f", what, &v) < 2)
+                    {
+                        rtLog("control: \"button\" needs a name and a value\n");
+                        continue;
+                    }
+                    v = std::clamp(v, 0.0f, 1.0f);
+                    const std::string n(what);
+                    float *slot = n == "trigger" ? &ctl.trigger : n == "squeeze" ? &ctl.squeeze : n == "stick_click" ? &ctl.stickClick
+                                  : n == "primary" ? &ctl.primary : n == "secondary" ? &ctl.secondary : n == "menu" ? &ctl.menu : nullptr;
+                    if (slot)
+                        *slot = v;
+                    else
+                        rtLog("control: unknown button \"%s\" (trigger squeeze stick_click primary secondary menu)\n", what);
+                }
             }
             else if (c.rfind("head ", 0) == 0)
             {
@@ -391,11 +526,43 @@ namespace
         return p;
     }
 
+    // the recentred space as the application makes it: the head's position, its yaw only
+    void resetHandRef(int64_t t)
+    {
+        const XrPosef h = headAt(t);
+        const XrQuaternionf &q = h.orientation;
+        const float fx = -(2.0f * (q.x * q.z + q.w * q.y)), fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+        g_handRef.orientation = axisAngle({0, 1, 0}, std::atan2(-fx, -fz));
+        g_handRef.position = h.position;
+    }
+
+    // a simulated controller's grip (and aim) pose in LOCAL
+    XrPosef handInLocal(int hand)
+    {
+        const float *p = g_ctl[hand].pose;
+        XrPosef r = identity();
+        r.orientation = qmul(qmul(axisAngle({0, 1, 0}, p[3] * kPi / 180.0f), axisAngle({1, 0, 0}, p[4] * kPi / 180.0f)),
+                             axisAngle({0, 0, -1}, p[5] * kPi / 180.0f));
+        r.position = {p[0], p[1], p[2]};
+        return compose(g_handRef, r);
+    }
+
     XrPosef spaceInLocal(const Space &s, int64_t t)
     {
+        if (s.action)
+            return compose(handInLocal(s.hand), s.offset);
         if (s.type == XR_REFERENCE_SPACE_TYPE_VIEW)
             return compose(headAt(t), s.offset);
         return s.offset;
+    }
+    // an action space is tracked while its pose action is active (synced, focused, bound) and the action alive
+    bool spaceTracked(const Space &s)
+    {
+        if (!s.action)
+            return true;
+        if (std::find(g_actions.begin(), g_actions.end(), s.action) == g_actions.end())
+            return false;
+        return s.action->st[s.hand].active;
     }
 
     // ---- captures ---------------------------------------------------------------------------------------------------
@@ -728,18 +895,36 @@ namespace
     {
         if (layer)
             return XR_ERROR_API_LAYER_NOT_PRESENT;
-        *count = 1;
+        // XR_KHR_D3D11_enable, and XR_EXT_hp_mixed_reality_controller unless XRTEST_NO_HP_EXT is set
+        const bool hp = !(std::getenv("XRTEST_NO_HP_EXT") && *std::getenv("XRTEST_NO_HP_EXT"));
+        *count = hp ? 2 : 1;
         if (cap == 0)
             return XR_SUCCESS;
-        if (cap < 1)
+        if (cap < *count)
             return XR_ERROR_SIZE_INSUFFICIENT;
         std::snprintf(props[0].extensionName, XR_MAX_EXTENSION_NAME_SIZE, "%s", XR_KHR_D3D11_ENABLE_EXTENSION_NAME);
         props[0].extensionVersion = XR_KHR_D3D11_enable_SPEC_VERSION;
+        if (hp)
+        {
+            std::snprintf(props[1].extensionName, XR_MAX_EXTENSION_NAME_SIZE, "%s", XR_EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME);
+            props[1].extensionVersion = XR_EXT_hp_mixed_reality_controller_SPEC_VERSION;
+        }
         return XR_SUCCESS;
     }
-    XrResult XRAPI_CALL rtCreateInstance(const XrInstanceCreateInfo *, XrInstance *out)
+    XrResult XRAPI_CALL rtCreateInstance(const XrInstanceCreateInfo *ci, XrInstance *out)
     {
+        const bool hpOffered = !(std::getenv("XRTEST_NO_HP_EXT") && *std::getenv("XRTEST_NO_HP_EXT"));
+        bool hp = false;
+        for (uint32_t i = 0; ci && i < ci->enabledExtensionCount; ++i)
+        {
+            const char *e = ci->enabledExtensionNames[i];
+            if (std::strcmp(e, XR_EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME) == 0 && hpOffered)
+                hp = true;
+            else if (std::strcmp(e, XR_KHR_D3D11_ENABLE_EXTENSION_NAME) != 0)
+                return violation(XR_ERROR_EXTENSION_NOT_PRESENT, "xrCreateInstance with an extension not offered");
+        }
         std::lock_guard<std::mutex> lock(g_mutex);
+        g_hpEnabled = hp;
         if (g_instanceLost) // the runtime "restarted": a new instance
         {
             g_instanceLost = false;
@@ -831,6 +1016,7 @@ namespace
         g_session->device = b->device;
         b->device->GetImmediateContext(&g_session->context);
         g_start = nowNs();
+        resetHandRef(g_start); // the controllers: relative to the head at the start
         if (const char *hz = std::getenv("XRTEST_HZ"); hz && std::atof(hz) >= 30.0)
             g_periodNs = static_cast<int64_t>(1e9 / std::atof(hz));
         pushState(XR_SESSION_STATE_IDLE);
@@ -920,6 +1106,16 @@ namespace
     {
         if (t <= 0)
             return violation(XR_ERROR_TIME_INVALID, "xrLocateSpace at time 0");
+        if (!space || !base)
+            return violation(XR_ERROR_HANDLE_INVALID, "xrLocateSpace with a null space");
+        if (loc->type != XR_TYPE_SPACE_LOCATION)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrLocateSpace's location is not XR_TYPE_SPACE_LOCATION");
+        if (!spaceTracked(*reinterpret_cast<Space *>(space)) || !spaceTracked(*reinterpret_cast<Space *>(base)))
+        {
+            loc->pose = identity();
+            loc->locationFlags = 0; // a controller not tracked (its action inactive)
+            return XR_SUCCESS;
+        }
         const XrPosef a = spaceInLocal(*reinterpret_cast<Space *>(space), t), b = spaceInLocal(*reinterpret_cast<Space *>(base), t);
         loc->pose = compose(inverse(b), a);
         loc->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
@@ -1173,6 +1369,727 @@ namespace
                          info->layerCount, static_cast<unsigned long long>(g_violations));
         return XR_SUCCESS;
     }
+    // ---- paths and actions ------------------------------------------------------------------------------------------
+    // a well-formed path: "/" + segments of [a-z0-9-_.] (not "." / ".."), no empty segment, no trailing "/"
+    bool validPath(const char *s)
+    {
+        const size_t n = strnlen(s, XR_MAX_PATH_LENGTH);
+        if (n == 0 || n >= XR_MAX_PATH_LENGTH || s[0] != '/' || s[n - 1] == '/')
+            return false;
+        std::string seg;
+        for (size_t i = 1; i <= n; ++i)
+        {
+            const char c = i < n ? s[i] : '/';
+            if (c == '/')
+            {
+                if (seg.empty() || seg == "." || seg == "..")
+                    return false;
+                seg.clear();
+                continue;
+            }
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'))
+                return false;
+            seg += c;
+        }
+        return true;
+    }
+    // an action (set) name: [a-z0-9-_.]+
+    bool validName(const char *s, size_t cap)
+    {
+        const size_t n = strnlen(s, cap);
+        if (n == 0 || n >= cap)
+            return false;
+        for (size_t i = 0; i < n; ++i)
+            if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9') || s[i] == '-' || s[i] == '_' || s[i] == '.'))
+                return false;
+        return true;
+    }
+    XrPath pathOf(const std::string &s)
+    {
+        const auto it = std::find(g_paths.begin(), g_paths.end(), s);
+        if (it != g_paths.end())
+            return static_cast<XrPath>(it - g_paths.begin() + 1);
+        g_paths.push_back(s);
+        return static_cast<XrPath>(g_paths.size());
+    }
+    const std::string *pathText(XrPath p) { return p >= 1 && p <= g_paths.size() ? &g_paths[static_cast<size_t>(p - 1)] : nullptr; }
+    bool topLevelUserPath(const std::string &s)
+    {
+        return s == "/user/hand/left" || s == "/user/hand/right" || s == "/user/head" || s == "/user/gamepad" || s == "/user/treadmill";
+    }
+    ActionSet *liveSet(XrActionSet h)
+    {
+        auto *s = reinterpret_cast<ActionSet *>(h);
+        return std::find(g_actionSets.begin(), g_actionSets.end(), s) != g_actionSets.end() ? s : nullptr;
+    }
+    Action *liveAction(XrAction h)
+    {
+        auto *a = reinterpret_cast<Action *>(h);
+        return std::find(g_actions.begin(), g_actions.end(), a) != g_actions.end() ? a : nullptr;
+    }
+
+    const char *const kProfiles[] = {
+        "/interaction_profiles/khr/simple_controller",    "/interaction_profiles/oculus/touch_controller",
+        "/interaction_profiles/valve/index_controller",   "/interaction_profiles/htc/vive_controller",
+        "/interaction_profiles/microsoft/motion_controller", "/interaction_profiles/hp/mixed_reality_controller",
+    };
+    enum
+    {
+        PSimple,
+        PTouch,
+        PIndex,
+        PVive,
+        PWmr,
+        PHp,
+        PCount
+    };
+    int profileIndex(const std::string &s)
+    {
+        for (int i = 0; i < PCount; ++i)
+            if (s == kProfiles[i])
+                return i;
+        return -1;
+    }
+    // what <component> (under /user/hand/<hand>/) is on that profile; KNone: not there. Vector2 sources only as the
+    // parent (".../thumbstick"), float / bool ones as full paths (".../trigger/value").
+    Kind componentKind(int profile, int hand, const std::string &c)
+    {
+        if (c == "input/grip/pose" || c == "input/aim/pose")
+            return KPose;
+        if (c == "output/haptic")
+            return KHaptic;
+        struct E
+        {
+            const char *c;
+            char hand; // L, R, B
+            Kind k;
+        };
+        static const E simple[] = {{"input/select/click", 'B', KBool}, {"input/menu/click", 'B', KBool}};
+        static const E touch[] = {
+            {"input/x/click", 'L', KBool},        {"input/x/touch", 'L', KBool},       {"input/y/click", 'L', KBool},
+            {"input/y/touch", 'L', KBool},        {"input/menu/click", 'L', KBool},    {"input/a/click", 'R', KBool},
+            {"input/a/touch", 'R', KBool},        {"input/b/click", 'R', KBool},       {"input/b/touch", 'R', KBool},
+            {"input/system/click", 'R', KBool},   {"input/squeeze/value", 'B', KFloat}, {"input/trigger/value", 'B', KFloat},
+            {"input/trigger/touch", 'B', KBool},  {"input/thumbstick", 'B', KVec},     {"input/thumbstick/x", 'B', KFloat},
+            {"input/thumbstick/y", 'B', KFloat},  {"input/thumbstick/click", 'B', KBool}, {"input/thumbstick/touch", 'B', KBool},
+            {"input/thumbrest/touch", 'B', KBool},
+        };
+        static const E index[] = {
+            {"input/system/click", 'B', KBool},  {"input/system/touch", 'B', KBool},  {"input/a/click", 'B', KBool},
+            {"input/a/touch", 'B', KBool},       {"input/b/click", 'B', KBool},       {"input/b/touch", 'B', KBool},
+            {"input/squeeze/value", 'B', KFloat}, {"input/squeeze/force", 'B', KFloat}, {"input/trigger/click", 'B', KBool},
+            {"input/trigger/value", 'B', KFloat}, {"input/trigger/touch", 'B', KBool}, {"input/thumbstick", 'B', KVec},
+            {"input/thumbstick/x", 'B', KFloat}, {"input/thumbstick/y", 'B', KFloat}, {"input/thumbstick/click", 'B', KBool},
+            {"input/thumbstick/touch", 'B', KBool}, {"input/trackpad", 'B', KVec},    {"input/trackpad/x", 'B', KFloat},
+            {"input/trackpad/y", 'B', KFloat},   {"input/trackpad/force", 'B', KFloat}, {"input/trackpad/touch", 'B', KBool},
+        };
+        static const E vive[] = {
+            {"input/system/click", 'B', KBool},  {"input/squeeze/click", 'B', KBool}, {"input/menu/click", 'B', KBool},
+            {"input/trigger/click", 'B', KBool}, {"input/trigger/value", 'B', KFloat}, {"input/trackpad", 'B', KVec},
+            {"input/trackpad/x", 'B', KFloat},   {"input/trackpad/y", 'B', KFloat},   {"input/trackpad/click", 'B', KBool},
+            {"input/trackpad/touch", 'B', KBool},
+        };
+        static const E wmr[] = {
+            {"input/menu/click", 'B', KBool},     {"input/squeeze/click", 'B', KBool},  {"input/trigger/value", 'B', KFloat},
+            {"input/thumbstick", 'B', KVec},      {"input/thumbstick/x", 'B', KFloat},  {"input/thumbstick/y", 'B', KFloat},
+            {"input/thumbstick/click", 'B', KBool}, {"input/trackpad", 'B', KVec},      {"input/trackpad/x", 'B', KFloat},
+            {"input/trackpad/y", 'B', KFloat},    {"input/trackpad/click", 'B', KBool}, {"input/trackpad/touch", 'B', KBool},
+        };
+        static const E hp[] = {
+            {"input/x/click", 'L', KBool},        {"input/y/click", 'L', KBool},        {"input/a/click", 'R', KBool},
+            {"input/b/click", 'R', KBool},        {"input/menu/click", 'B', KBool},     {"input/squeeze/value", 'B', KFloat},
+            {"input/trigger/value", 'B', KFloat}, {"input/thumbstick", 'B', KVec},      {"input/thumbstick/x", 'B', KFloat},
+            {"input/thumbstick/y", 'B', KFloat},  {"input/thumbstick/click", 'B', KBool},
+        };
+        const E *t = nullptr;
+        size_t n = 0;
+        switch (profile)
+        {
+        case PSimple: t = simple, n = std::size(simple); break;
+        case PTouch: t = touch, n = std::size(touch); break;
+        case PIndex: t = index, n = std::size(index); break;
+        case PVive: t = vive, n = std::size(vive); break;
+        case PWmr: t = wmr, n = std::size(wmr); break;
+        case PHp: t = hp, n = std::size(hp); break;
+        default: return KNone;
+        }
+        for (size_t i = 0; i < n; ++i)
+            if (c == t[i].c && (t[i].hand == 'B' || (t[i].hand == 'L') == (hand == 0)))
+                return t[i].k;
+        return KNone;
+    }
+    bool compatible(XrActionType type, Kind k)
+    {
+        switch (type)
+        {
+        case XR_ACTION_TYPE_BOOLEAN_INPUT:
+        case XR_ACTION_TYPE_FLOAT_INPUT: return k == KBool || k == KFloat;
+        case XR_ACTION_TYPE_VECTOR2F_INPUT: return k == KVec;
+        case XR_ACTION_TYPE_POSE_INPUT: return k == KPose;
+        case XR_ACTION_TYPE_VIBRATION_OUTPUT: return k == KHaptic;
+        default: return false;
+        }
+    }
+    // the simulated Touch controller's value for a component (v[1]: a vector's y)
+    void touchValue(int hand, const std::string &c, float v[2])
+    {
+        const Controller &k = g_ctl[hand];
+        v[0] = v[1] = 0.0f;
+        const bool l = hand == 0;
+        if (c == "input/trigger/value") v[0] = k.trigger;
+        else if (c == "input/trigger/touch") v[0] = k.trigger > 0.0f ? 1.0f : 0.0f;
+        else if (c == "input/squeeze/value") v[0] = k.squeeze;
+        else if (c == "input/thumbstick") v[0] = k.stick[0], v[1] = k.stick[1];
+        else if (c == "input/thumbstick/x") v[0] = k.stick[0];
+        else if (c == "input/thumbstick/y") v[0] = k.stick[1];
+        else if (c == "input/thumbstick/click") v[0] = k.stickClick;
+        else if (c == "input/thumbstick/touch") v[0] = k.stickClick > 0 || k.stick[0] != 0 || k.stick[1] != 0 ? 1.0f : 0.0f;
+        else if (c == (l ? "input/x/click" : "input/a/click")) v[0] = k.primary;
+        else if (c == (l ? "input/x/touch" : "input/a/touch")) v[0] = k.primary > 0 ? 1.0f : 0.0f;
+        else if (c == (l ? "input/y/click" : "input/b/click")) v[0] = k.secondary;
+        else if (c == (l ? "input/y/touch" : "input/b/touch")) v[0] = k.secondary > 0 ? 1.0f : 0.0f;
+        else if (c == "input/menu/click") v[0] = k.menu;
+    }
+    // the action's subaction slot for `path`: 2 for XR_NULL_PATH, 0 / 1 for a hand, -1 for another of its paths,
+    // -2 when the path is not one of its subaction paths
+    int subactionSlot(const Action &a, XrPath path)
+    {
+        if (path == XR_NULL_PATH)
+            return 2;
+        if (std::find(a.subactions.begin(), a.subactions.end(), path) == a.subactions.end())
+            return -2;
+        const std::string *t = pathText(path);
+        return *t == "/user/hand/left" ? 0 : *t == "/user/hand/right" ? 1 : -1;
+    }
+
+    XrResult XRAPI_CALL rtStringToPath(XrInstance inst, const char *s, XrPath *out)
+    {
+        if (inst != instanceHandle())
+            return violation(XR_ERROR_HANDLE_INVALID, "xrStringToPath with an unknown instance");
+        if (!s || !out)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrStringToPath with a null pointer");
+        if (!validPath(s))
+        {
+            rtLog("xrStringToPath(\"%s\"): malformed\n", s);
+            return violation(XR_ERROR_PATH_FORMAT_INVALID, "xrStringToPath with a malformed path");
+        }
+        *out = pathOf(s);
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtPathToString(XrInstance inst, XrPath p, uint32_t cap, uint32_t *count, char *buffer)
+    {
+        if (inst != instanceHandle())
+            return violation(XR_ERROR_HANDLE_INVALID, "xrPathToString with an unknown instance");
+        const std::string *t = pathText(p);
+        if (!t)
+            return violation(XR_ERROR_PATH_INVALID, "xrPathToString with an unknown path");
+        *count = static_cast<uint32_t>(t->size() + 1);
+        if (cap == 0)
+            return XR_SUCCESS;
+        if (cap < *count)
+            return XR_ERROR_SIZE_INSUFFICIENT;
+        std::memcpy(buffer, t->c_str(), t->size() + 1);
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtCreateActionSet(XrInstance inst, const XrActionSetCreateInfo *ci, XrActionSet *out)
+    {
+        if (inst != instanceHandle())
+            return g_instanceLost ? XR_ERROR_INSTANCE_LOST : violation(XR_ERROR_HANDLE_INVALID, "xrCreateActionSet with an unknown instance");
+        if (!ci || ci->type != XR_TYPE_ACTION_SET_CREATE_INFO)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrCreateActionSet without XR_TYPE_ACTION_SET_CREATE_INFO");
+        if (!validName(ci->actionSetName, XR_MAX_ACTION_SET_NAME_SIZE))
+            return violation(XR_ERROR_PATH_FORMAT_INVALID, "xrCreateActionSet: a malformed action set name");
+        if (!strnlen(ci->localizedActionSetName, XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE))
+            return violation(XR_ERROR_LOCALIZED_NAME_INVALID, "xrCreateActionSet: an empty localized name");
+        for (const ActionSet *s : g_actionSets)
+        {
+            if (s->instance != g_instanceId)
+                continue;
+            if (s->name == ci->actionSetName)
+                return violation(XR_ERROR_NAME_DUPLICATED, "xrCreateActionSet: the name is taken");
+            if (s->localized == ci->localizedActionSetName)
+                return violation(XR_ERROR_LOCALIZED_NAME_DUPLICATED, "xrCreateActionSet: the localized name is taken");
+        }
+        auto *s = new ActionSet();
+        s->instance = g_instanceId;
+        s->name = ci->actionSetName;
+        s->localized = ci->localizedActionSetName;
+        s->priority = ci->priority;
+        g_actionSets.push_back(s);
+        *out = reinterpret_cast<XrActionSet>(s);
+        rtLog("action set \"%s\" created\n", s->name.c_str());
+        return XR_SUCCESS;
+    }
+    void deleteAction(Action *a)
+    {
+        g_actions.erase(std::remove(g_actions.begin(), g_actions.end(), a), g_actions.end());
+        delete a;
+    }
+    XrResult XRAPI_CALL rtDestroyActionSet(XrActionSet h)
+    {
+        ActionSet *s = liveSet(h);
+        if (!s)
+            return violation(XR_ERROR_HANDLE_INVALID, "xrDestroyActionSet with an unknown handle");
+        for (Action *a : s->actions)
+            deleteAction(a);
+        g_actionSets.erase(std::remove(g_actionSets.begin(), g_actionSets.end(), s), g_actionSets.end());
+        rtLog("action set \"%s\" destroyed\n", s->name.c_str());
+        delete s;
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtCreateAction(XrActionSet h, const XrActionCreateInfo *ci, XrAction *out)
+    {
+        ActionSet *s = liveSet(h);
+        if (!s)
+            return violation(XR_ERROR_HANDLE_INVALID, "xrCreateAction with an unknown action set");
+        if (!ci || ci->type != XR_TYPE_ACTION_CREATE_INFO)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrCreateAction without XR_TYPE_ACTION_CREATE_INFO");
+        if (s->attached)
+            return violation(XR_ERROR_ACTIONSETS_ALREADY_ATTACHED, "xrCreateAction in an action set already attached");
+        if (!validName(ci->actionName, XR_MAX_ACTION_NAME_SIZE))
+            return violation(XR_ERROR_PATH_FORMAT_INVALID, "xrCreateAction: a malformed action name");
+        if (!strnlen(ci->localizedActionName, XR_MAX_LOCALIZED_ACTION_NAME_SIZE))
+            return violation(XR_ERROR_LOCALIZED_NAME_INVALID, "xrCreateAction: an empty localized name");
+        for (const Action *a : s->actions)
+        {
+            if (a->name == ci->actionName)
+                return violation(XR_ERROR_NAME_DUPLICATED, "xrCreateAction: the name is taken in its set");
+            if (a->localized == ci->localizedActionName)
+                return violation(XR_ERROR_LOCALIZED_NAME_DUPLICATED, "xrCreateAction: the localized name is taken in its set");
+        }
+        switch (ci->actionType)
+        {
+        case XR_ACTION_TYPE_BOOLEAN_INPUT:
+        case XR_ACTION_TYPE_FLOAT_INPUT:
+        case XR_ACTION_TYPE_VECTOR2F_INPUT:
+        case XR_ACTION_TYPE_POSE_INPUT:
+        case XR_ACTION_TYPE_VIBRATION_OUTPUT: break;
+        default: return violation(XR_ERROR_VALIDATION_FAILURE, "xrCreateAction: an unknown action type");
+        }
+        std::vector<XrPath> subs;
+        for (uint32_t i = 0; i < ci->countSubactionPaths; ++i)
+        {
+            const std::string *t = pathText(ci->subactionPaths[i]);
+            if (!t)
+                return violation(XR_ERROR_PATH_INVALID, "xrCreateAction: an unknown subaction path");
+            if (!topLevelUserPath(*t) || std::find(subs.begin(), subs.end(), ci->subactionPaths[i]) != subs.end())
+                return violation(XR_ERROR_PATH_UNSUPPORTED, "xrCreateAction: a subaction path not a top level user path, or twice");
+            subs.push_back(ci->subactionPaths[i]);
+        }
+        auto *a = new Action();
+        a->set = s;
+        a->name = ci->actionName;
+        a->localized = ci->localizedActionName;
+        a->type = ci->actionType;
+        a->subactions = subs;
+        s->actions.push_back(a);
+        g_actions.push_back(a);
+        *out = reinterpret_cast<XrAction>(a);
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtDestroyAction(XrAction h)
+    {
+        Action *a = liveAction(h);
+        if (!a)
+            return violation(XR_ERROR_HANDLE_INVALID, "xrDestroyAction with an unknown handle");
+        auto &v = a->set->actions;
+        v.erase(std::remove(v.begin(), v.end(), a), v.end());
+        deleteAction(a);
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtSuggestInteractionProfileBindings(XrInstance inst, const XrInteractionProfileSuggestedBinding *sb)
+    {
+        if (inst != instanceHandle())
+            return violation(XR_ERROR_HANDLE_INVALID, "xrSuggestInteractionProfileBindings with an unknown instance");
+        if (!sb || sb->type != XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrSuggestInteractionProfileBindings without its structure type");
+        const std::string *prof = pathText(sb->interactionProfile);
+        if (!prof)
+            return violation(XR_ERROR_PATH_INVALID, "xrSuggestInteractionProfileBindings: an unknown profile path");
+        const int pi = profileIndex(*prof);
+        if (pi < 0)
+        {
+            rtLog("bindings for %s: not a profile this runtime knows (XR_ERROR_PATH_UNSUPPORTED)\n", prof->c_str());
+            return XR_ERROR_PATH_UNSUPPORTED;
+        }
+        if (pi == PHp && !g_hpEnabled)
+            return violation(XR_ERROR_PATH_UNSUPPORTED, "the hp/mixed_reality_controller profile without XR_EXT_hp_mixed_reality_controller");
+        if (!sb->countSuggestedBindings || !sb->suggestedBindings)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrSuggestInteractionProfileBindings without bindings");
+        std::vector<std::pair<Action *, Binding>> add;
+        for (uint32_t i = 0; i < sb->countSuggestedBindings; ++i)
+        {
+            const XrActionSuggestedBinding &b = sb->suggestedBindings[i];
+            Action *a = liveAction(b.action);
+            if (!a)
+                return violation(XR_ERROR_HANDLE_INVALID, "a suggested binding's action is unknown");
+            if (a->set->attached)
+                return violation(XR_ERROR_ACTIONSETS_ALREADY_ATTACHED, "bindings suggested for an action set already attached");
+            const std::string *bp = pathText(b.binding);
+            if (!bp)
+                return violation(XR_ERROR_PATH_INVALID, "a suggested binding's path is unknown");
+            Binding bd;
+            bd.profile = sb->interactionProfile;
+            static const std::string left = "/user/hand/left/", right = "/user/hand/right/";
+            if (bp->rfind(left, 0) == 0)
+                bd.hand = 0, bd.component = bp->substr(left.size());
+            else if (bp->rfind(right, 0) == 0)
+                bd.hand = 1, bd.component = bp->substr(right.size());
+            bd.kind = bd.component.empty() ? KNone : componentKind(pi, bd.hand, bd.component);
+            if (bd.kind == KNone)
+            {
+                rtLog("binding %s is not on %s\n", bp->c_str(), prof->c_str());
+                return violation(XR_ERROR_PATH_UNSUPPORTED, "a suggested binding path the profile does not have");
+            }
+            if (!compatible(a->type, bd.kind))
+            {
+                rtLog("binding %s does not fit action \"%s\" (type %d)\n", bp->c_str(), a->name.c_str(), static_cast<int>(a->type));
+                return violation(XR_ERROR_PATH_UNSUPPORTED, "a suggested binding of the wrong type for its action");
+            }
+            add.push_back({a, bd});
+        }
+        // a profile's suggestions replace the earlier ones for it
+        for (Action *a : g_actions)
+            a->bindings.erase(std::remove_if(a->bindings.begin(), a->bindings.end(),
+                                             [&](const Binding &b) { return b.profile == sb->interactionProfile; }),
+                              a->bindings.end());
+        for (auto &p : add)
+            p.first->bindings.push_back(p.second);
+        rtLog("bindings for %s: %u\n", prof->c_str(), sb->countSuggestedBindings);
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtAttachSessionActionSets(XrSession s, const XrSessionActionSetsAttachInfo *ai)
+    {
+        auto *ss = reinterpret_cast<Session *>(s);
+        if (!ss)
+            return violation(XR_ERROR_HANDLE_INVALID, "a null session handle");
+        if (ss->lost)
+            return XR_ERROR_SESSION_LOST;
+        if (!ai || ai->type != XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrAttachSessionActionSets without its structure type");
+        if (!ss->attached.empty())
+            return violation(XR_ERROR_ACTIONSETS_ALREADY_ATTACHED, "xrAttachSessionActionSets twice on a session");
+        if (!ai->countActionSets)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrAttachSessionActionSets with no action set");
+        std::vector<ActionSet *> sets;
+        for (uint32_t i = 0; i < ai->countActionSets; ++i)
+        {
+            ActionSet *set = liveSet(ai->actionSets[i]);
+            if (!set)
+                return violation(XR_ERROR_HANDLE_INVALID, "xrAttachSessionActionSets with an unknown action set");
+            sets.push_back(set);
+        }
+        for (ActionSet *set : sets)
+            set->attached = true;
+        ss->attached = sets;
+        ss->profilesPending = true;
+        rtLog("%u action set(s) attached\n", ai->countActionSets);
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtSyncActions(XrSession s, const XrActionsSyncInfo *si)
+    {
+        auto *ss = reinterpret_cast<Session *>(s);
+        if (!ss)
+            return violation(XR_ERROR_HANDLE_INVALID, "a null session handle");
+        if (ss->lost)
+            return XR_ERROR_SESSION_LOST;
+        if (!si || si->type != XR_TYPE_ACTIONS_SYNC_INFO)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrSyncActions without XR_TYPE_ACTIONS_SYNC_INFO");
+        if (ss->attached.empty())
+            return violation(XR_ERROR_ACTIONSET_NOT_ATTACHED, "xrSyncActions before xrAttachSessionActionSets");
+        const XrPath handPath[2] = {pathOf("/user/hand/left"), pathOf("/user/hand/right")};
+        // the active sets, each with the hands it is active for
+        std::vector<std::pair<ActionSet *, int>> active; // (set, mask: 1 left, 2 right)
+        for (uint32_t i = 0; i < si->countActiveActionSets; ++i)
+        {
+            const XrActiveActionSet &as = si->activeActionSets[i];
+            ActionSet *set = liveSet(as.actionSet);
+            if (!set)
+                return violation(XR_ERROR_HANDLE_INVALID, "xrSyncActions with an unknown action set");
+            if (std::find(ss->attached.begin(), ss->attached.end(), set) == ss->attached.end())
+                return violation(XR_ERROR_ACTIONSET_NOT_ATTACHED, "xrSyncActions with an action set not attached to the session");
+            int mask = 3;
+            if (as.subactionPath != XR_NULL_PATH)
+            {
+                const std::string *t = pathText(as.subactionPath);
+                if (!t || !topLevelUserPath(*t))
+                    return violation(XR_ERROR_PATH_UNSUPPORTED, "xrSyncActions: an active set's subaction path is not a top level user path");
+                mask = as.subactionPath == handPath[0] ? 1 : as.subactionPath == handPath[1] ? 2 : 0;
+            }
+            active.push_back({set, mask});
+        }
+        // the interaction profiles: change only here. The simulated hardware is an oculus/touch_controller pair: a
+        // hand gets that profile when the application bound something of it there
+        const XrPath touch = pathOf(kProfiles[PTouch]);
+        if (ss->profilesPending)
+        {
+            ss->profilesPending = false;
+            bool changed = false;
+            for (int h = 0; h < 2; ++h)
+            {
+                bool bound = false;
+                for (const ActionSet *set : ss->attached)
+                    for (const Action *a : set->actions)
+                        for (const Binding &b : a->bindings)
+                            bound = bound || (b.profile == touch && b.hand == h);
+                const XrPath p = bound ? touch : XR_NULL_PATH;
+                if (p != ss->profile[h])
+                {
+                    ss->profile[h] = p;
+                    changed = true;
+                    rtLog("%s hand: interaction profile %s\n", h ? "right" : "left", bound ? kProfiles[PTouch] : "none");
+                }
+            }
+            if (changed)
+            {
+                XrEventDataInteractionProfileChanged e = {XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED};
+                e.session = s;
+                std::lock_guard<std::mutex> lock(g_mutex);
+                pushEvent(&e, sizeof(e));
+            }
+        }
+        const bool focused = ss->state == XR_SESSION_STATE_FOCUSED;
+        const XrTime now = nowNs();
+        for (ActionSet *set : ss->attached)
+        {
+            int mask = 0;
+            for (const auto &p : active)
+                if (p.first == set)
+                    mask |= p.second;
+            for (Action *a : set->actions)
+            {
+                for (int h = 0; h < 2; ++h)
+                {
+                    Action::State &st = a->st[h];
+                    float v[2] = {0.0f, 0.0f};
+                    bool on = focused && (mask & (1 << h)) && ss->profile[h] == touch &&
+                              (a->subactions.empty() ||
+                               std::find(a->subactions.begin(), a->subactions.end(), handPath[h]) != a->subactions.end());
+                    bool bound = false;
+                    for (const Binding &b : a->bindings)
+                    {
+                        if (b.profile != touch || b.hand != h)
+                            continue;
+                        bound = true;
+                        float x[2];
+                        touchValue(h, b.component, x);
+                        if (a->type == XR_ACTION_TYPE_BOOLEAN_INPUT)
+                            v[0] = std::max(v[0], x[0] >= 0.5f ? 1.0f : 0.0f);
+                        else if (a->type == XR_ACTION_TYPE_FLOAT_INPUT)
+                        {
+                            const float f = b.kind == KBool ? (x[0] >= 0.5f ? 1.0f : 0.0f) : x[0];
+                            if (std::fabs(f) > std::fabs(v[0]))
+                                v[0] = f;
+                        }
+                        else if (a->type == XR_ACTION_TYPE_VECTOR2F_INPUT && x[0] * x[0] + x[1] * x[1] > v[0] * v[0] + v[1] * v[1])
+                            v[0] = x[0], v[1] = x[1];
+                    }
+                    on = on && bound;
+                    if (!on)
+                        v[0] = v[1] = 0.0f;
+                    st.changed = on && st.active && (v[0] != st.v[0] || v[1] != st.v[1]);
+                    if (st.changed || (on && !st.active))
+                        st.lastChange = now;
+                    st.active = on;
+                    st.v[0] = v[0], st.v[1] = v[1];
+                }
+                // both hands (XR_NULL_PATH): the larger value of the active ones
+                Action::State &both = a->st[2];
+                float v[2] = {0.0f, 0.0f};
+                bool on = false;
+                for (int h = 0; h < 2; ++h)
+                {
+                    const Action::State &st = a->st[h];
+                    if (!st.active)
+                        continue;
+                    if (!on || st.v[0] * st.v[0] + st.v[1] * st.v[1] > v[0] * v[0] + v[1] * v[1])
+                        v[0] = st.v[0], v[1] = st.v[1];
+                    on = true;
+                }
+                both.changed = on && both.active && (v[0] != both.v[0] || v[1] != both.v[1]);
+                if (both.changed || (on && !both.active))
+                    both.lastChange = now;
+                both.active = on;
+                both.v[0] = v[0], both.v[1] = v[1];
+            }
+        }
+        return focused ? XR_SUCCESS : XR_SESSION_NOT_FOCUSED;
+    }
+    XrResult XRAPI_CALL rtGetCurrentInteractionProfile(XrSession s, XrPath top, XrInteractionProfileState *out)
+    {
+        auto *ss = reinterpret_cast<Session *>(s);
+        if (!ss)
+            return violation(XR_ERROR_HANDLE_INVALID, "a null session handle");
+        if (ss->lost)
+            return XR_ERROR_SESSION_LOST;
+        if (!out || out->type != XR_TYPE_INTERACTION_PROFILE_STATE)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrGetCurrentInteractionProfile without XR_TYPE_INTERACTION_PROFILE_STATE");
+        if (ss->attached.empty())
+            return violation(XR_ERROR_ACTIONSET_NOT_ATTACHED, "xrGetCurrentInteractionProfile before xrAttachSessionActionSets");
+        const std::string *t = pathText(top);
+        if (!t)
+            return violation(XR_ERROR_PATH_INVALID, "xrGetCurrentInteractionProfile with an unknown path");
+        if (!topLevelUserPath(*t))
+            return violation(XR_ERROR_PATH_UNSUPPORTED, "xrGetCurrentInteractionProfile with a path not a top level user path");
+        out->interactionProfile = *t == "/user/hand/left" ? ss->profile[0] : *t == "/user/hand/right" ? ss->profile[1] : XR_NULL_PATH;
+        return XR_SUCCESS;
+    }
+    // the common checks of xrGetActionState*: the synced state for getInfo, or an error
+    XrResult actionState(XrSession s, const XrActionStateGetInfo *gi, XrActionType type, XrStructureType stateType,
+                         const XrStructureType *outType, const Action::State *&out)
+    {
+        static const Action::State inactive;
+        auto *ss = reinterpret_cast<Session *>(s);
+        if (!ss)
+            return violation(XR_ERROR_HANDLE_INVALID, "a null session handle");
+        if (ss->lost)
+            return XR_ERROR_SESSION_LOST;
+        if (!gi || gi->type != XR_TYPE_ACTION_STATE_GET_INFO || !outType || *outType != stateType)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrGetActionState*: a wrong structure type");
+        Action *a = liveAction(gi->action);
+        if (!a)
+            return violation(XR_ERROR_HANDLE_INVALID, "xrGetActionState* with an unknown action");
+        if (a->type != type)
+            return violation(XR_ERROR_ACTION_TYPE_MISMATCH, "xrGetActionState* of another type than the action's");
+        if (std::find(ss->attached.begin(), ss->attached.end(), a->set) == ss->attached.end())
+            return violation(XR_ERROR_ACTIONSET_NOT_ATTACHED, "xrGetActionState* for an action whose set is not attached");
+        const int slot = subactionSlot(*a, gi->subactionPath);
+        if (slot == -2)
+            return violation(XR_ERROR_PATH_UNSUPPORTED, "xrGetActionState* with a subaction path the action was not created with");
+        out = slot < 0 ? &inactive : &a->st[slot];
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtGetActionStateBoolean(XrSession s, const XrActionStateGetInfo *gi, XrActionStateBoolean *st)
+    {
+        const Action::State *a = nullptr;
+        const XrResult r = actionState(s, gi, XR_ACTION_TYPE_BOOLEAN_INPUT, XR_TYPE_ACTION_STATE_BOOLEAN, st ? &st->type : nullptr, a);
+        if (XR_FAILED(r))
+            return r;
+        st->isActive = a->active, st->currentState = a->v[0] >= 0.5f, st->changedSinceLastSync = a->changed;
+        st->lastChangeTime = a->lastChange;
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtGetActionStateFloat(XrSession s, const XrActionStateGetInfo *gi, XrActionStateFloat *st)
+    {
+        const Action::State *a = nullptr;
+        const XrResult r = actionState(s, gi, XR_ACTION_TYPE_FLOAT_INPUT, XR_TYPE_ACTION_STATE_FLOAT, st ? &st->type : nullptr, a);
+        if (XR_FAILED(r))
+            return r;
+        st->isActive = a->active, st->currentState = a->v[0], st->changedSinceLastSync = a->changed;
+        st->lastChangeTime = a->lastChange;
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtGetActionStateVector2f(XrSession s, const XrActionStateGetInfo *gi, XrActionStateVector2f *st)
+    {
+        const Action::State *a = nullptr;
+        const XrResult r = actionState(s, gi, XR_ACTION_TYPE_VECTOR2F_INPUT, XR_TYPE_ACTION_STATE_VECTOR2F, st ? &st->type : nullptr, a);
+        if (XR_FAILED(r))
+            return r;
+        st->isActive = a->active, st->currentState = {a->v[0], a->v[1]}, st->changedSinceLastSync = a->changed;
+        st->lastChangeTime = a->lastChange;
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtGetActionStatePose(XrSession s, const XrActionStateGetInfo *gi, XrActionStatePose *st)
+    {
+        const Action::State *a = nullptr;
+        const XrResult r = actionState(s, gi, XR_ACTION_TYPE_POSE_INPUT, XR_TYPE_ACTION_STATE_POSE, st ? &st->type : nullptr, a);
+        if (XR_FAILED(r))
+            return r;
+        st->isActive = a->active;
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtCreateActionSpace(XrSession s, const XrActionSpaceCreateInfo *ci, XrSpace *out)
+    {
+        auto *ss = reinterpret_cast<Session *>(s);
+        if (!ss)
+            return violation(XR_ERROR_HANDLE_INVALID, "a null session handle");
+        if (ss->lost)
+            return XR_ERROR_SESSION_LOST;
+        if (!ci || ci->type != XR_TYPE_ACTION_SPACE_CREATE_INFO)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrCreateActionSpace without XR_TYPE_ACTION_SPACE_CREATE_INFO");
+        Action *a = liveAction(ci->action);
+        if (!a)
+            return violation(XR_ERROR_HANDLE_INVALID, "xrCreateActionSpace with an unknown action");
+        if (a->type != XR_ACTION_TYPE_POSE_INPUT)
+            return violation(XR_ERROR_ACTION_TYPE_MISMATCH, "xrCreateActionSpace for an action that is not a pose");
+        const int slot = subactionSlot(*a, ci->subactionPath);
+        if (slot == -2)
+            return violation(XR_ERROR_PATH_UNSUPPORTED, "xrCreateActionSpace with a subaction path the action was not created with");
+        const XrQuaternionf &q = ci->poseInActionSpace.orientation;
+        if (std::fabs(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w - 1.0f) > 0.01f)
+            return violation(XR_ERROR_POSE_INVALID, "xrCreateActionSpace: the pose's orientation is not normalised");
+        auto *sp = new Space();
+        sp->action = a;
+        sp->hand = slot == 1 ? 1 : 0;
+        sp->offset = ci->poseInActionSpace;
+        *out = reinterpret_cast<XrSpace>(sp);
+        rtLog("action space for \"%s\" (%s hand)\n", a->name.c_str(), sp->hand ? "right" : "left");
+        return XR_SUCCESS;
+    }
+    // the common checks of the haptic calls: the action and its hand slot (0 left, 1 right, 2 both, -1 another path)
+    XrResult hapticAction(XrSession s, const XrHapticActionInfo *hi, Session *&ss, Action *&a, int &slot)
+    {
+        ss = reinterpret_cast<Session *>(s);
+        if (!ss)
+            return violation(XR_ERROR_HANDLE_INVALID, "a null session handle");
+        if (ss->lost)
+            return XR_ERROR_SESSION_LOST;
+        if (!hi || hi->type != XR_TYPE_HAPTIC_ACTION_INFO)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "a haptic call without XR_TYPE_HAPTIC_ACTION_INFO");
+        a = liveAction(hi->action);
+        if (!a)
+            return violation(XR_ERROR_HANDLE_INVALID, "a haptic call with an unknown action");
+        if (a->type != XR_ACTION_TYPE_VIBRATION_OUTPUT)
+            return violation(XR_ERROR_ACTION_TYPE_MISMATCH, "a haptic call for an action that is not a vibration output");
+        if (std::find(ss->attached.begin(), ss->attached.end(), a->set) == ss->attached.end())
+            return violation(XR_ERROR_ACTIONSET_NOT_ATTACHED, "a haptic call for an action whose set is not attached");
+        slot = subactionSlot(*a, hi->subactionPath);
+        if (slot == -2)
+            return violation(XR_ERROR_PATH_UNSUPPORTED, "a haptic call with a subaction path the action was not created with");
+        return XR_SUCCESS;
+    }
+    const char *slotName(int slot) { return slot == 0 ? "left" : slot == 1 ? "right" : slot == 2 ? "both" : "other"; }
+    XrResult XRAPI_CALL rtApplyHapticFeedback(XrSession s, const XrHapticActionInfo *hi, const XrHapticBaseHeader *h)
+    {
+        Session *ss = nullptr;
+        Action *a = nullptr;
+        int slot = 0;
+        const XrResult r = hapticAction(s, hi, ss, a, slot);
+        if (XR_FAILED(r))
+            return r;
+        if (!h || h->type != XR_TYPE_HAPTIC_VIBRATION)
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrApplyHapticFeedback without XR_TYPE_HAPTIC_VIBRATION");
+        const auto *v = reinterpret_cast<const XrHapticVibration *>(h);
+        if (!(v->amplitude >= 0.0f && v->amplitude <= 1.0f))
+            return violation(XR_ERROR_VALIDATION_FAILURE, "xrApplyHapticFeedback: amplitude outside 0..1");
+        if (ss->state != XR_SESSION_STATE_FOCUSED)
+        {
+            rtLog("haptic %s: ignored (not focused)\n", slotName(slot));
+            return XR_SESSION_NOT_FOCUSED;
+        }
+        char freq[32];
+        if (v->frequency == XR_FREQUENCY_UNSPECIFIED)
+            std::snprintf(freq, sizeof(freq), "unspecified");
+        else
+            std::snprintf(freq, sizeof(freq), "%.0f Hz", v->frequency);
+        rtLog("haptic %s: amplitude %.2f, duration %s%.1f ms, frequency %s\n", slotName(slot), v->amplitude,
+              v->duration == XR_MIN_HAPTIC_DURATION ? "minimum " : "", v->duration == XR_MIN_HAPTIC_DURATION ? 0.0 : v->duration / 1e6, freq);
+        return XR_SUCCESS;
+    }
+    XrResult XRAPI_CALL rtStopHapticFeedback(XrSession s, const XrHapticActionInfo *hi)
+    {
+        Session *ss = nullptr;
+        Action *a = nullptr;
+        int slot = 0;
+        const XrResult r = hapticAction(s, hi, ss, a, slot);
+        if (XR_FAILED(r))
+            return r;
+        if (ss->state != XR_SESSION_STATE_FOCUSED)
+            return XR_SESSION_NOT_FOCUSED;
+        rtLog("haptic %s: stopped\n", slotName(slot));
+        return XR_SUCCESS;
+    }
+
     XrResult XRAPI_CALL rtResultToString(XrInstance, XrResult r, char buffer[XR_MAX_RESULT_STRING_SIZE])
     {
         std::snprintf(buffer, XR_MAX_RESULT_STRING_SIZE, "XR_RESULT_%d", static_cast<int>(r));
@@ -1220,6 +2137,23 @@ namespace
             E("xrBeginFrame", rtBeginFrame),
             E("xrEndFrame", rtEndFrame),
             E("xrResultToString", rtResultToString),
+            E("xrStringToPath", rtStringToPath),
+            E("xrPathToString", rtPathToString),
+            E("xrCreateActionSet", rtCreateActionSet),
+            E("xrDestroyActionSet", rtDestroyActionSet),
+            E("xrCreateAction", rtCreateAction),
+            E("xrDestroyAction", rtDestroyAction),
+            E("xrSuggestInteractionProfileBindings", rtSuggestInteractionProfileBindings),
+            E("xrAttachSessionActionSets", rtAttachSessionActionSets),
+            E("xrSyncActions", rtSyncActions),
+            E("xrGetCurrentInteractionProfile", rtGetCurrentInteractionProfile),
+            E("xrGetActionStateBoolean", rtGetActionStateBoolean),
+            E("xrGetActionStateFloat", rtGetActionStateFloat),
+            E("xrGetActionStateVector2f", rtGetActionStateVector2f),
+            E("xrGetActionStatePose", rtGetActionStatePose),
+            E("xrCreateActionSpace", rtCreateActionSpace),
+            E("xrApplyHapticFeedback", rtApplyHapticFeedback),
+            E("xrStopHapticFeedback", rtStopHapticFeedback),
         };
 #undef E
         for (const Entry &e : table)

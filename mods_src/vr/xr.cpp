@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <vector>
 
 namespace vr
@@ -112,8 +113,28 @@ namespace vr
     X(xrEndFrame)                                                                                                           \
     X(xrResultToString)                                                                                                     \
     X(xrLocateViews)
+// the actions (core 1.0 too, but optional here: without them no controller input, the rest works)
+#define VR_XR_INPUT_FUNCTIONS(X)                                                                                            \
+    X(xrStringToPath)                                                                                                       \
+    X(xrPathToString)                                                                                                       \
+    X(xrCreateActionSet)                                                                                                    \
+    X(xrDestroyActionSet)                                                                                                   \
+    X(xrCreateAction)                                                                                                       \
+    X(xrDestroyAction)                                                                                                      \
+    X(xrSuggestInteractionProfileBindings)                                                                                  \
+    X(xrAttachSessionActionSets)                                                                                            \
+    X(xrGetCurrentInteractionProfile)                                                                                       \
+    X(xrSyncActions)                                                                                                        \
+    X(xrGetActionStateBoolean)                                                                                              \
+    X(xrGetActionStateFloat)                                                                                                \
+    X(xrGetActionStateVector2f)                                                                                             \
+    X(xrGetActionStatePose)                                                                                                 \
+    X(xrCreateActionSpace)                                                                                                  \
+    X(xrApplyHapticFeedback)                                                                                                \
+    X(xrStopHapticFeedback)
 #define VR_XR_DECLARE(name) PFN_##name p_##name = nullptr;
         VR_XR_FUNCTIONS(VR_XR_DECLARE)
+        VR_XR_INPUT_FUNCTIONS(VR_XR_DECLARE)
 #undef VR_XR_DECLARE
         PFN_xrEnumerateInstanceExtensionProperties p_xrEnumerateInstanceExtensionProperties = nullptr;
         PFN_xrCreateInstance p_xrCreateInstance = nullptr;
@@ -144,6 +165,31 @@ namespace vr
         bool g_viewsLogged = false;      // the first stereo locate logged
         bool g_eyeFovValid = false;
         uint64_t g_errors = 0;
+
+        // ---- the controllers' actions -------------------------------------------------------------------------------
+        enum Act
+        {
+            ActGrip,
+            ActAim,
+            ActTrigger,
+            ActSqueeze,
+            ActStick,
+            ActStickClick,
+            ActPrimary,
+            ActSecondary,
+            ActMenu,
+            ActHaptic,
+            ActCount
+        };
+        bool g_inputFunctions = false; // the runtime has the action functions
+        bool g_hpExtension = false;    // XR_EXT_hp_mixed_reality_controller enabled
+        bool g_inputMade = false;      // the action set made and bound (per instance; tried once)
+        XrActionSet g_actionSet = XR_NULL_HANDLE;
+        XrAction g_actions[ActCount] = {};
+        XrPath g_handPath[2] = {XR_NULL_PATH, XR_NULL_PATH};
+        XrSpace g_gripSpace[2] = {}, g_aimSpace[2] = {};
+        bool g_inputAttached = false; // attached to the current session
+        std::string g_profile[2];     // the hands' interaction profiles (from INTERACTION_PROFILE_CHANGED)
 
         const char *stateName(XrSessionState s)
         {
@@ -310,11 +356,12 @@ namespace vr
             }
             std::vector<XrExtensionProperties> ext(count, {XR_TYPE_EXTENSION_PROPERTIES});
             p_xrEnumerateInstanceExtensionProperties(nullptr, count, &count, ext.data());
-            bool d3d11 = false;
+            bool d3d11 = false, hp = false;
             std::string names;
             for (const XrExtensionProperties &e : ext)
             {
                 d3d11 = d3d11 || std::strcmp(e.extensionName, XR_KHR_D3D11_ENABLE_EXTENSION_NAME) == 0;
+                hp = hp || std::strcmp(e.extensionName, XR_EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME) == 0;
                 names += std::string(names.empty() ? "" : " ") + e.extensionName;
             }
             vr::log("runtime extensions (%u): %s\n", count, names.c_str());
@@ -323,22 +370,32 @@ namespace vr
                 why = "the OpenXR runtime has no D3D11 support (XR_KHR_D3D11_enable)";
                 return false;
             }
-            const char *enabled[] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+            // the HP Reverb G2 controller's profile needs its extension (OpenXR 1.0)
+            const char *enabled[] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME, XR_EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME};
             XrInstanceCreateInfo ci = {XR_TYPE_INSTANCE_CREATE_INFO};
             std::snprintf(ci.applicationInfo.applicationName, sizeof(ci.applicationInfo.applicationName), "C-12 Final Resistance (recompiled)");
             ci.applicationInfo.applicationVersion = 1;
             std::snprintf(ci.applicationInfo.engineName, sizeof(ci.applicationInfo.engineName), "C12Recomp vr");
             ci.applicationInfo.engineVersion = 1;
             ci.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0); // 1.0: every runtime accepts it
-            ci.enabledExtensionCount = 1;
+            ci.enabledExtensionCount = hp ? 2 : 1;
             ci.enabledExtensionNames = enabled;
             r = p_xrCreateInstance(&ci, &g_instance);
+            if (XR_FAILED(r) && hp) // a runtime that lists it but will not enable it: without
+            {
+                vr::log("xrCreateInstance with %s: XrResult %d; again without it\n", XR_EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME, r);
+                hp = false;
+                ci.enabledExtensionCount = 1;
+                r = p_xrCreateInstance(&ci, &g_instance);
+            }
             if (XR_FAILED(r))
             {
                 why = std::string("xrCreateInstance: XrResult ") + std::to_string(r);
                 g_instance = XR_NULL_HANDLE;
                 return false;
             }
+            g_hpExtension = hp;
+            g_inputMade = false;
 #define VR_XR_LOAD(name) pGetInstanceProcAddr(g_instance, #name, reinterpret_cast<PFN_xrVoidFunction *>(&p_##name));
             VR_XR_FUNCTIONS(VR_XR_LOAD)
 #undef VR_XR_LOAD
@@ -348,6 +405,15 @@ namespace vr
                 why = "the OpenXR runtime lacks a core function";
                 return false;
             }
+            g_inputFunctions = true;
+#define VR_XR_INPUT_LOAD(name)                                                                                              \
+    p_##name = nullptr;                                                                                                     \
+    pGetInstanceProcAddr(g_instance, #name, reinterpret_cast<PFN_xrVoidFunction *>(&p_##name));                             \
+    g_inputFunctions = g_inputFunctions && p_##name;
+            VR_XR_INPUT_FUNCTIONS(VR_XR_INPUT_LOAD)
+#undef VR_XR_INPUT_LOAD
+            if (!g_inputFunctions)
+                vr::log("warning: the OpenXR runtime lacks the action functions: no controller input\n");
 #undef VR_XR_CHECK
             XrInstanceProperties props = {XR_TYPE_INSTANCE_PROPERTIES};
             if (XR_SUCCEEDED(p_xrGetInstanceProperties(g_instance, &props)))
@@ -436,6 +502,231 @@ namespace vr
                 dx->Release();
             }
             return luid;
+        }
+
+        XrPath toPath(const char *s)
+        {
+            XrPath p = XR_NULL_PATH;
+            if (!check(p_xrStringToPath(g_instance, s, &p), s))
+                return XR_NULL_PATH;
+            return p;
+        }
+
+        // the suggested bindings: per profile, (action, hand L / R / B(oth), the component under /user/hand/<hand>/)
+        struct Binding
+        {
+            Act act;
+            char hand;
+            const char *component;
+        };
+        const Binding kTouch[] = {
+            {ActGrip, 'B', "input/grip/pose"},         {ActAim, 'B', "input/aim/pose"},
+            {ActTrigger, 'B', "input/trigger/value"},  {ActSqueeze, 'B', "input/squeeze/value"},
+            {ActStick, 'B', "input/thumbstick"},       {ActStickClick, 'B', "input/thumbstick/click"},
+            {ActPrimary, 'L', "input/x/click"},        {ActPrimary, 'R', "input/a/click"},
+            {ActSecondary, 'L', "input/y/click"},      {ActSecondary, 'R', "input/b/click"},
+            {ActMenu, 'L', "input/menu/click"},        {ActHaptic, 'B', "output/haptic"},
+        };
+        const Binding kIndex[] = {
+            {ActGrip, 'B', "input/grip/pose"},        {ActAim, 'B', "input/aim/pose"},
+            {ActTrigger, 'B', "input/trigger/value"}, {ActSqueeze, 'B', "input/squeeze/value"},
+            {ActStick, 'B', "input/thumbstick"},      {ActStickClick, 'B', "input/thumbstick/click"},
+            {ActPrimary, 'B', "input/a/click"},       {ActSecondary, 'B', "input/b/click"},
+            {ActHaptic, 'B', "output/haptic"},
+        };
+        const Binding kVive[] = {
+            {ActGrip, 'B', "input/grip/pose"},        {ActAim, 'B', "input/aim/pose"},
+            {ActTrigger, 'B', "input/trigger/value"}, {ActSqueeze, 'B', "input/squeeze/click"},
+            {ActStick, 'B', "input/trackpad"},        {ActStickClick, 'B', "input/trackpad/click"},
+            {ActPrimary, 'B', "input/trackpad/click"}, {ActSecondary, 'B', "input/menu/click"},
+            {ActMenu, 'B', "input/menu/click"},       {ActHaptic, 'B', "output/haptic"},
+        };
+        const Binding kWmr[] = {
+            {ActGrip, 'B', "input/grip/pose"},         {ActAim, 'B', "input/aim/pose"},
+            {ActTrigger, 'B', "input/trigger/value"},  {ActSqueeze, 'B', "input/squeeze/click"},
+            {ActStick, 'B', "input/thumbstick"},       {ActStickClick, 'B', "input/thumbstick/click"},
+            {ActPrimary, 'B', "input/trackpad/click"}, {ActSecondary, 'B', "input/menu/click"},
+            {ActMenu, 'B', "input/menu/click"},        {ActHaptic, 'B', "output/haptic"},
+        };
+        const Binding kSimple[] = {
+            {ActGrip, 'B', "input/grip/pose"},       {ActAim, 'B', "input/aim/pose"}, {ActTrigger, 'B', "input/select/click"},
+            {ActMenu, 'B', "input/menu/click"},      {ActHaptic, 'B', "output/haptic"},
+        };
+        const Binding kHp[] = {
+            {ActGrip, 'B', "input/grip/pose"},        {ActAim, 'B', "input/aim/pose"},
+            {ActTrigger, 'B', "input/trigger/value"}, {ActSqueeze, 'B', "input/squeeze/value"},
+            {ActStick, 'B', "input/thumbstick"},      {ActStickClick, 'B', "input/thumbstick/click"},
+            {ActPrimary, 'L', "input/x/click"},       {ActPrimary, 'R', "input/a/click"},
+            {ActSecondary, 'L', "input/y/click"},     {ActSecondary, 'R', "input/b/click"},
+            {ActMenu, 'B', "input/menu/click"},       {ActHaptic, 'B', "output/haptic"},
+        };
+
+        void destroyInput()
+        {
+            if (g_actionSet && p_xrDestroyActionSet)
+                p_xrDestroyActionSet(g_actionSet); // its actions with it
+            g_actionSet = XR_NULL_HANDLE;
+            for (XrAction &a : g_actions)
+                a = XR_NULL_HANDLE;
+            g_inputMade = false;
+        }
+
+        // the action set, its actions and the suggested bindings: once per instance, before any attach
+        void createInput()
+        {
+            if (g_inputMade)
+                return;
+            g_inputMade = true;
+            if (!g_inputFunctions)
+                return;
+            g_handPath[0] = toPath("/user/hand/left");
+            g_handPath[1] = toPath("/user/hand/right");
+            XrActionSetCreateInfo si = {XR_TYPE_ACTION_SET_CREATE_INFO};
+            std::snprintf(si.actionSetName, sizeof(si.actionSetName), "c12");
+            std::snprintf(si.localizedActionSetName, sizeof(si.localizedActionSetName), "C-12");
+            if (!g_handPath[0] || !g_handPath[1] || !check(p_xrCreateActionSet(g_instance, &si, &g_actionSet), "xrCreateActionSet"))
+            {
+                g_actionSet = XR_NULL_HANDLE;
+                return;
+            }
+            struct Def
+            {
+                const char *name, *localized;
+                XrActionType type;
+            };
+            static const Def defs[ActCount] = {
+                {"grip_pose", "Hand pose", XR_ACTION_TYPE_POSE_INPUT},
+                {"aim_pose", "Pointer pose", XR_ACTION_TYPE_POSE_INPUT},
+                {"trigger", "Trigger", XR_ACTION_TYPE_FLOAT_INPUT},
+                {"squeeze", "Grip", XR_ACTION_TYPE_FLOAT_INPUT},
+                {"thumbstick", "Thumbstick", XR_ACTION_TYPE_VECTOR2F_INPUT},
+                {"thumbstick_click", "Thumbstick click", XR_ACTION_TYPE_BOOLEAN_INPUT},
+                {"primary", "Primary button (A / X)", XR_ACTION_TYPE_BOOLEAN_INPUT},
+                {"secondary", "Secondary button (B / Y)", XR_ACTION_TYPE_BOOLEAN_INPUT},
+                {"menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT},
+                {"haptic", "Vibration", XR_ACTION_TYPE_VIBRATION_OUTPUT},
+            };
+            for (int i = 0; i < ActCount; ++i)
+            {
+                XrActionCreateInfo ai = {XR_TYPE_ACTION_CREATE_INFO};
+                std::snprintf(ai.actionName, sizeof(ai.actionName), "%s", defs[i].name);
+                std::snprintf(ai.localizedActionName, sizeof(ai.localizedActionName), "%s", defs[i].localized);
+                ai.actionType = defs[i].type;
+                ai.countSubactionPaths = 2;
+                ai.subactionPaths = g_handPath;
+                if (!check(p_xrCreateAction(g_actionSet, &ai, &g_actions[i]), "xrCreateAction"))
+                {
+                    destroyInput();
+                    g_inputMade = true; // not again for this instance
+                    return;
+                }
+            }
+            struct Profile
+            {
+                const char *path;
+                const Binding *b;
+                size_t n;
+            };
+            std::vector<Profile> profiles = {
+                {"/interaction_profiles/oculus/touch_controller", kTouch, std::size(kTouch)},
+                {"/interaction_profiles/valve/index_controller", kIndex, std::size(kIndex)},
+                {"/interaction_profiles/htc/vive_controller", kVive, std::size(kVive)},
+                {"/interaction_profiles/microsoft/motion_controller", kWmr, std::size(kWmr)},
+                {"/interaction_profiles/khr/simple_controller", kSimple, std::size(kSimple)},
+            };
+            if (g_hpExtension)
+                profiles.push_back({"/interaction_profiles/hp/mixed_reality_controller", kHp, std::size(kHp)});
+            std::string bound;
+            for (const Profile &p : profiles)
+            {
+                std::vector<XrActionSuggestedBinding> sb;
+                for (size_t i = 0; i < p.n; ++i)
+                    for (int h = 0; h < 2; ++h)
+                    {
+                        if ((p.b[i].hand == 'L' && h != 0) || (p.b[i].hand == 'R' && h != 1))
+                            continue;
+                        const std::string path = std::string(h ? "/user/hand/right/" : "/user/hand/left/") + p.b[i].component;
+                        const XrPath xp = toPath(path.c_str());
+                        if (xp)
+                            sb.push_back({g_actions[p.b[i].act], xp});
+                    }
+                XrInteractionProfileSuggestedBinding s = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+                s.interactionProfile = toPath(p.path);
+                s.countSuggestedBindings = static_cast<uint32_t>(sb.size());
+                s.suggestedBindings = sb.data();
+                const XrResult r = s.interactionProfile ? p_xrSuggestInteractionProfileBindings(g_instance, &s) : XR_ERROR_PATH_INVALID;
+                if (XR_SUCCEEDED(r))
+                    bound += std::string(bound.empty() ? "" : ", ") + (p.path + std::strlen("/interaction_profiles/"));
+                else
+                    vr::log("controller bindings for %s not accepted: %s\n", p.path, resultText(r));
+            }
+            vr::log("controller bindings suggested for: %s\n", bound.empty() ? "none" : bound.c_str());
+        }
+
+        // the action set onto the session just created, and the hands' pose spaces
+        void attachInput()
+        {
+            g_inputAttached = false;
+            g_profile[0].clear(), g_profile[1].clear();
+            if (!g_actionSet || !g_session)
+                return;
+            XrSessionActionSetsAttachInfo ai = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+            ai.countActionSets = 1;
+            ai.actionSets = &g_actionSet;
+            if (!check(p_xrAttachSessionActionSets(g_session, &ai), "xrAttachSessionActionSets"))
+                return;
+            for (int h = 0; h < 2; ++h)
+            {
+                XrActionSpaceCreateInfo si = {XR_TYPE_ACTION_SPACE_CREATE_INFO};
+                si.subactionPath = g_handPath[h];
+                si.poseInActionSpace.orientation.w = 1.0f;
+                si.action = g_actions[ActGrip];
+                check(p_xrCreateActionSpace(g_session, &si, &g_gripSpace[h]), "xrCreateActionSpace (grip)");
+                si.action = g_actions[ActAim];
+                check(p_xrCreateActionSpace(g_session, &si, &g_aimSpace[h]), "xrCreateActionSpace (aim)");
+            }
+            g_inputAttached = true;
+            vr::log("controller actions attached to the session\n");
+        }
+
+        // the hands' interaction profiles (after XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED)
+        void updateProfiles()
+        {
+            if (!g_inputAttached || !g_session)
+                return;
+            for (int h = 0; h < 2; ++h)
+            {
+                XrInteractionProfileState st = {XR_TYPE_INTERACTION_PROFILE_STATE};
+                if (!check(p_xrGetCurrentInteractionProfile(g_session, g_handPath[h], &st), "xrGetCurrentInteractionProfile"))
+                    continue;
+                std::string name;
+                if (st.interactionProfile != XR_NULL_PATH)
+                {
+                    char text[XR_MAX_PATH_LENGTH] = {};
+                    uint32_t n = 0;
+                    if (XR_SUCCEEDED(p_xrPathToString(g_instance, st.interactionProfile, sizeof(text), &n, text)))
+                        name = text;
+                }
+                if (name != g_profile[h])
+                {
+                    g_profile[h] = name;
+                    vr::log("%s hand: interaction profile %s\n", h ? "right" : "left", name.empty() ? "none" : name.c_str());
+                }
+            }
+        }
+
+        bool locatePose(XrSpace space, Pose &out)
+        {
+            XrSpaceLocation loc = {XR_TYPE_SPACE_LOCATION};
+            if (!space || XR_FAILED(p_xrLocateSpace(space, g_space, g_frame.predictedDisplayTime, &loc)) ||
+                !(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+                return false;
+            out.q[0] = loc.pose.orientation.x, out.q[1] = loc.pose.orientation.y, out.q[2] = loc.pose.orientation.z,
+            out.q[3] = loc.pose.orientation.w;
+            const bool pos = (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+            out.p[0] = pos ? loc.pose.position.x : 0.0f, out.p[1] = pos ? loc.pose.position.y : 0.0f,
+            out.p[2] = pos ? loc.pose.position.z : 0.0f;
+            return true;
         }
 
         bool createSession(std::string &why)
@@ -528,6 +819,9 @@ namespace vr
                     g_formats[0] == DXGI_FORMAT_R8G8B8A8_UNORM || g_formats[0] == DXGI_FORMAT_B8G8R8A8_UNORM
                         ? " (no sRGB format: the picture may look too bright)"
                         : "");
+            // the controllers: bound once per instance, attached to every session before its first xrSyncActions
+            createInput();
+            attachInput();
             return true;
         }
 
@@ -544,7 +838,9 @@ namespace vr
         {
             for (Swapchain &s : g_chains)
                 destroySwapchain(s);
-            for (XrSpace *sp : {&g_viewSpace, &g_localSpace, &g_space})
+            g_inputAttached = false;
+            g_profile[0].clear(), g_profile[1].clear();
+            for (XrSpace *sp : {&g_viewSpace, &g_localSpace, &g_space, &g_gripSpace[0], &g_gripSpace[1], &g_aimSpace[0], &g_aimSpace[1]})
                 if (*sp)
                 {
                     p_xrDestroySpace(*sp);
@@ -664,8 +960,11 @@ namespace vr
                 p_xrEndSession(g_session);
             g_frameBegun = false;
             destroySession();
+            destroyInput();
             p_xrDestroyInstance(g_instance);
         }
+        g_inputMade = false;
+        g_actionSet = XR_NULL_HANDLE;
         g_instance = XR_NULL_HANDLE;
         g_system = XR_NULL_SYSTEM_ID;
         g_pending = false;
@@ -742,6 +1041,8 @@ namespace vr
                 vr::log("the runtime moved the reference space (its own recentre): recentring\n");
                 g_wantRecenter = true;
             }
+            else if (e.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED)
+                updateProfiles();
             else if (e.type == XR_TYPE_EVENT_DATA_EVENTS_LOST)
                 vr::log("warning: %u OpenXR events lost\n", reinterpret_cast<const XrEventDataEventsLost &>(e).lostEventCount);
             e = {XR_TYPE_EVENT_DATA_BUFFER};
@@ -1061,14 +1362,101 @@ namespace vr
             lostOrStopped(r);
     }
 
+    bool syncInput(Hand out[2])
+    {
+        out[0] = Hand();
+        out[1] = Hand();
+        if (!g_inputAttached || !running() || !focused() || !g_frame.predictedDisplayTime)
+            return false;
+        XrActiveActionSet active = {g_actionSet, XR_NULL_PATH};
+        XrActionsSyncInfo si = {XR_TYPE_ACTIONS_SYNC_INFO};
+        si.countActiveActionSets = 1;
+        si.activeActionSets = &active;
+        const XrResult r = p_xrSyncActions(g_session, &si);
+        if (r == XR_SESSION_NOT_FOCUSED)
+            return false;
+        if (!check(r, "xrSyncActions"))
+        {
+            lostOrStopped(r);
+            return false;
+        }
+        bool any = false;
+        for (int h = 0; h < 2; ++h)
+        {
+            Hand &o = out[h];
+            XrActionStateGetInfo gi = {XR_TYPE_ACTION_STATE_GET_INFO};
+            gi.subactionPath = g_handPath[h];
+            gi.action = g_actions[ActGrip];
+            XrActionStatePose pose = {XR_TYPE_ACTION_STATE_POSE};
+            if (XR_SUCCEEDED(p_xrGetActionStatePose(g_session, &gi, &pose)) && pose.isActive)
+            {
+                o.active = locatePose(g_gripSpace[h], o.grip);
+                if (!locatePose(g_aimSpace[h], o.aim))
+                    o.aim = o.grip;
+            }
+            auto value = [&](Act a) {
+                gi.action = g_actions[a];
+                XrActionStateFloat s = {XR_TYPE_ACTION_STATE_FLOAT};
+                return XR_SUCCEEDED(p_xrGetActionStateFloat(g_session, &gi, &s)) && s.isActive ? s.currentState : 0.0f;
+            };
+            auto button = [&](Act a) {
+                gi.action = g_actions[a];
+                XrActionStateBoolean s = {XR_TYPE_ACTION_STATE_BOOLEAN};
+                return XR_SUCCEEDED(p_xrGetActionStateBoolean(g_session, &gi, &s)) && s.isActive && s.currentState;
+            };
+            o.trigger = value(ActTrigger);
+            o.squeeze = value(ActSqueeze);
+            gi.action = g_actions[ActStick];
+            XrActionStateVector2f stick = {XR_TYPE_ACTION_STATE_VECTOR2F};
+            if (XR_SUCCEEDED(p_xrGetActionStateVector2f(g_session, &gi, &stick)) && stick.isActive)
+                o.stick[0] = stick.currentState.x, o.stick[1] = stick.currentState.y;
+            o.stickClick = button(ActStickClick);
+            o.primary = button(ActPrimary);
+            o.secondary = button(ActSecondary);
+            o.menu = button(ActMenu);
+            any = any || o.active;
+        }
+        return any;
+    }
+
+    void haptic(int hand, float amplitude, float seconds)
+    {
+        if (!g_inputAttached || !running() || !focused() || hand < 0 || hand > 1)
+            return;
+        XrHapticActionInfo hi = {XR_TYPE_HAPTIC_ACTION_INFO};
+        hi.action = g_actions[ActHaptic];
+        hi.subactionPath = g_handPath[hand];
+        if (amplitude <= 0.0f)
+        {
+            check(p_xrStopHapticFeedback(g_session, &hi), "xrStopHapticFeedback");
+            return;
+        }
+        XrHapticVibration v = {XR_TYPE_HAPTIC_VIBRATION};
+        v.amplitude = std::min(amplitude, 1.0f);
+        v.duration = seconds > 0.0f ? static_cast<XrDuration>(static_cast<double>(seconds) * 1e9) : XR_MIN_HAPTIC_DURATION;
+        v.frequency = XR_FREQUENCY_UNSPECIFIED;
+        const XrResult r = p_xrApplyHapticFeedback(g_session, &hi, reinterpret_cast<const XrHapticBaseHeader *>(&v));
+        if (r != XR_SESSION_NOT_FOCUSED)
+            check(r, "xrApplyHapticFeedback");
+    }
+
+    std::string interactionProfile(int hand) { return hand == 0 || hand == 1 ? g_profile[hand] : std::string(); }
+
     uint64_t framesSubmitted() { return g_submitted; }
 
     std::string status()
     {
-        char b[256];
-        std::snprintf(b, sizeof(b), "runtime=\"%s\" instance=%d session=%d state=%s running=%d hz=%.0f frames=%llu errors=%llu",
+        auto shortProfile = [](const std::string &p) {
+            const size_t slash = p.find("/interaction_profiles/");
+            return p.empty() ? std::string("none") : slash == 0 ? p.substr(std::strlen("/interaction_profiles/")) : p;
+        };
+        char b[512];
+        std::snprintf(b, sizeof(b),
+                      "runtime=\"%s\" instance=%d session=%d state=%s running=%d hz=%.0f frames=%llu errors=%llu input=%s "
+                      "left=%s right=%s",
                       g_runtime.c_str(), g_instance ? 1 : 0, g_session ? 1 : 0, sessionStateName(), running() ? 1 : 0,
-                      refreshHz(), static_cast<unsigned long long>(g_submitted), static_cast<unsigned long long>(g_errors));
+                      refreshHz(), static_cast<unsigned long long>(g_submitted), static_cast<unsigned long long>(g_errors),
+                      g_inputAttached ? "attached" : "none", shortProfile(g_profile[0]).c_str(), shortProfile(g_profile[1]).c_str());
         return b;
     }
 }
