@@ -26,7 +26,7 @@ New-Item -ItemType Directory -Force $outdir, $obj | Out-Null
 $inc = @("/I$root\runtime", "/I$here", "/I$here\third_party\openxr\include")
 $cxx = @("/nologo", "/O2", "/GS-", "/W3", "/EHsc", "/std:c++17", "/MT", "/Zc:__cplusplus",
          "/DWIN32_LEAN_AND_MEAN", "/DNOMINMAX", "/D_CRT_SECURE_NO_WARNINGS") + $inc
-$syslibs = @("d3d11.lib", "dxgi.lib", "advapi32.lib", "user32.lib")
+$syslibs = @("d3d11.lib", "dxgi.lib", "d3dcompiler.lib", "advapi32.lib", "user32.lib")
 
 # the same fixed base as build_mods.ps1 gives a mod of that name
 function Get-ModBase([string]$name) {

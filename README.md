@@ -62,6 +62,24 @@ C = L2, Enter = Start, G = Select. XInput pads work at the same time (analog sti
   adjustable field of view.
 * HD textures: DuckStation `texupload-*.png` packs in the `hd_textures=` folder.
 
+## VR (OpenXR headset)
+
+`mods\vr.dll` (source `mods_src\vr`, build `mods_src\vr\build_vr.ps1`) plays the game in a headset through any OpenXR
+runtime (SteamVR, Oculus/Meta, WMR, Virtual Desktop...). Switch it on in the settings menu, Mods tab ("VR"); F8 recentres.
+`openxr_loader.dll` must be next to it in `mods\`.
+
+* Real stereo: the runtime draws the last world frame once per eye at the headset's rate (72-120 Hz) from each eye's
+  own pose and lens. The native 3D scene (level, characters, objects, effects, sky, shadows) is re-projected per eye
+  and blended between the game's 25 Hz frames, so head motion is always smooth; sprites, glows and lines are moved
+  into each eye at their sort depth.
+* With the first-person mod the camera turns with your head: W/A/S/D and aiming follow where you look, the mouse
+  turns the body. Without it the head looks around the game's own camera.
+* The HUD floats in front of you; menus, loading screens and films are shown on a screen ahead.
+* Settings (Mods tab): world scale, render scale, HUD and screen distance / width.
+* Testing without a headset: `--vr_test 1` with test screenshots writes both eyes and the HUD; `mods_src\vr\README.md`
+  describes the simulated OpenXR runtime (`vr_xr_test_runtime.dll`, captures of what each eye sees).
+* Not yet: motion controllers (the keyboard / mouse / pad play as usual), comfort options (snap turn, vignette).
+
 ## Known limitations
 
 * Level overlays (`RELOCS\*.LVB`) are recompiled position-independently (`gen/<name>_*.c`) and bound when the game

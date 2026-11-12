@@ -371,6 +371,32 @@ static void place_weapon(uint32_t gun) {
 
 static int sext12(int v) { v &= 0xfff; return v >= 0x800 ? v - 0x1000 : v; }
 
+/* VR (a headset mod publishes the head pose, API 4): the head turns the view - its yaw is added to the
+ * body's (mouse) yaw, the pitch is the head's - so walking and aiming follow where you look. The
+ * orientation applied is handed back to the runtime (vr_set_basis), which adds only what is left
+ * (roll, the newest head motion) when it draws each eye. Facing units: 4096 per turn, + = right / up. */
+static int vr_head(float* yaw_u, float* pitch_u, float basis[4]) {
+    if (api->version < 4 || !api->vr_get_head) return 0;
+    C12VrPose h;
+    if (!api->vr_get_head(&h)) return 0;
+    const float* q = h.q;   /* OpenXR: x right, y up, -z ahead */
+    float fx = -2.0f * (q[0] * q[2] + q[1] * q[3]);
+    float fy = -2.0f * (q[1] * q[2] - q[0] * q[3]);
+    float fz = -(1.0f - 2.0f * (q[0] * q[0] + q[1] * q[1]));
+    float hz = fsqrt1(fx * fx + fz * fz);
+    float yu = atan2_4096(-fx, -fz);                      /* + = left (about +y), facing units */
+    float pu = atan2_4096(fy, hz);                        /* + = up */
+    if (pu > 900.0f) pu = 900.0f;
+    if (pu < -900.0f) pu = -900.0f;
+    *yaw_u = -yu;
+    *pitch_u = pu;
+    /* basis = yaw(y) * pitch(x), half angles in degrees */
+    float ya = yu * (360.0f / 4096.0f) * 0.5f, pa = pu * (360.0f / 4096.0f) * 0.5f;
+    float sy = fsin(ya), cy = fcos(ya), sp = fsin(pa), cp = fcos(pa);
+    basis[0] = cy * sp; basis[1] = sy * cp; basis[2] = -sy * sp; basis[3] = cy * cp;
+    return 1;
+}
+
 /* Direct look: the mod keeps the view angles itself (cam+0x20 pitch, cam+0x22 yaw, 4096 per turn,
  * pitch 0 = level), adds the raw mouse movement to them and rebuilds the view rotation from them with
  * the game's own angle-to-matrix routine (800a1db8). The game's camera normally eases towards a
@@ -389,27 +415,32 @@ static void camera_hook(uint32_t* r, C12OrigFn orig) {
             saved_ac2 = api->game_option("cam_autocenter", 1);   /* the runtime's own "hold direction" would fight this */
             look_valid = 1;
         }
+    }
+    float hy = 0.0f, hp = 0.0f, basis[4];
+    int vr = active && vr_head(&hy, &hp, basis);
+    if (active) {
         float dy = 0, dp = 0;
         api->mouse_look(&dy, &dp);
         look_yaw += dy + look_turn * look_sign;
         look_turn = 0;
         if (look_set_pitch != 100000) { look_pitch = (float)look_set_pitch; look_set_pitch = 100000; }
-        look_pitch -= dp;
-        w16(cam + 0x20, (int)look_pitch & 0xfff);
-        w16(cam + 0x22, (int)look_yaw & 0xfff);
+        if (!vr) look_pitch -= dp;   /* in VR the head alone looks up and down */
+        w16(cam + 0x20, (int)(vr ? hp : look_pitch) & 0xfff);
+        w16(cam + 0x22, (int)(look_yaw + hy) & 0xfff);
     }
     orig(r);
     if (active) {
         if (!strafe) {   /* let the game swing the view behind the hero as in third person */
-            look_yaw = (float)(r16(cam + 0x22) & 0xfff);
-            look_pitch = (float)sext12(r16(cam + 0x20));
+            look_yaw = (float)(r16(cam + 0x22) & 0xfff) - hy;
+            if (!vr) look_pitch = (float)sext12(r16(cam + 0x20));
         }
         if (look_pitch > 900.0f) look_pitch = 900.0f;
         if (look_pitch < -900.0f) look_pitch = -900.0f;
         while (look_yaw >= 4096.0f) look_yaw -= 4096.0f;
         while (look_yaw < 0.0f) look_yaw += 4096.0f;
-        w16(cam + 0x20, (int)look_pitch & 0xfff);
-        w16(cam + 0x22, (int)look_yaw & 0xfff);
+        w16(cam + 0x20, (int)(vr ? hp : look_pitch) & 0xfff);
+        w16(cam + 0x22, (int)(look_yaw + hy) & 0xfff);
+        if (vr) api->vr_set_basis(basis);
         uint32_t v0 = r[2], v1 = r[3];
         r[4] = cam + 0x20;
         r[5] = vo + 0x0c;
