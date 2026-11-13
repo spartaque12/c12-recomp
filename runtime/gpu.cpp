@@ -63,6 +63,7 @@ static void set_clut(u32 v) {
 }
 
 
+static bool g_list_3d;     // the display list being drawn is the world (large ordering table)
 static GpuVtx make_vtx(u32 xy, u32 rgb, u32 uv) {
     GpuVtx v;
     v.x = sext11(xy & 0x7FF) + g_off_x;
@@ -73,10 +74,16 @@ static GpuVtx make_vtx(u32 xy, u32 rgb, u32 uv) {
     v.px = (float)v.x;
     v.py = (float)v.y;
     v.pw = 0;
-    extern bool prec_get(u32 word, float& x, float& y);
-    float fx, fy;
-    if (prec_get(xy, fx, fy) && fabsf(fx - sext11(xy & 0x7FF)) < 1.5f && fabsf(fy - sext11((xy >> 16) & 0x7FF)) < 1.5f) {
-        v.px = fx + g_off_x;
+    extern bool prec_get(u32 word, float& x, float& y, float& dx);
+    float fx, fy, fdx = 0.0f;
+    extern int g_prec_hits, g_prec_miss;
+    bool got = g_list_3d && prec_get(xy, fx, fy, fdx);
+    if (got && !(fabsf(fx - sext11(xy & 0x7FF)) < 1.5f && fabsf(fy - sext11((xy >> 16) & 0x7FF)) < 1.5f)) g_prec_miss++;
+    if (got && fabsf(fx - sext11(xy & 0x7FF)) < 1.5f && fabsf(fy - sext11((xy >> 16) & 0x7FF)) < 1.5f) {
+        g_prec_hits++;
+        v.pw = 1.0f;   // a projected 3D point (the widescreen layout leaves the polygon alone)
+        v.px = fx + fdx + g_off_x;
+        v.x = (int)floorf(v.px + 0.5f);
         v.py = fy + g_off_y;
     }
     return v;
@@ -283,7 +290,6 @@ static bool g_interp_pass;  // drawing the in-between frame (native geometry goe
 static bool g_noside;       // suppress uploads/copies/read-backs (list is being replayed)
 static bool g_in_list;
 static bool g_list_had_3d;  // the list being drawn contained 3D geometry
-static bool g_list_3d;     // the display list being drawn is the world (large ordering table)
 
 // View depth of the ordering-table slot being drawn (world list only; 0 = none). The game sorts with
 // slot = z >> 3; the front-most slots hold 2D overlays (scope frame), which get none. A little nearer
@@ -377,7 +383,9 @@ static void draw_polygon() {
     {
         int x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
         for (int k = 1; k < n; k++) { x0 = std::min(x0, v[k].x); x1 = std::max(x1, v[k].x); y0 = std::min(y0, v[k].y); y1 = std::max(y1, v[k].y); }
-        if (prim_2d(x0, y0, x1, y1, scene ? 2 : 0)) return;
+        bool proj = false;
+        for (int k = 0; k < n; k++) if (v[k].pw != 0.0f) proj = true;
+        if (prim_2d(x0, y0, x1, y1, proj ? 1 : scene ? 2 : 0)) return;
         if (g_st.ys != 0.0f || g_st.xs_dx != 0.0f)
             for (int k = 0; k < n; k++) { v[k].y += (int)g_st.ys; v[k].py += g_st.ys; v[k].x += (int)g_st.xs_dx; v[k].px += g_st.xs_dx; }
     }
@@ -959,6 +967,7 @@ static u32 g_last_shot_frame;
 void spu_frame();
 
 void gpu_vblank() {
+    { extern int g_prec_puts, g_prec_hits, g_prec_miss; if (g_dbg_frame >= 0 && g_prec_puts) logf("prec frame %d: %d recorded, %d used, %d off\n", g_frame, g_prec_puts, g_prec_hits, g_prec_miss); g_prec_puts = g_prec_hits = g_prec_miss = 0; }
     g_frame++;
     g_field ^= 1;
     { extern void mods_frame(); mods_frame(); }
