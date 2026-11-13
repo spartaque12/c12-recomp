@@ -659,7 +659,24 @@ static int meshfx_do(Ctx* c, RecompFn orig) {
     int poff = rds16(obj + 0x48);
     auto pal_at = [&](s32 ci) { return rd32(pal + 4u * (u32)(ci <= 0 ? -ci : ci + poff)); };
 
-    group_begin(cap, (uint64_t)obj, M);
+    // Pulled toward the eye like the PS1 sorts them: some lie flat on a wall and on each other (a
+    // control panel's power bars, their dark covers and lamps), and the ordering table puts them in
+    // front by the instance's slot bias (obj+0x44, slot = z >> 3 + bias) and, in one slot, the one
+    // handled first in front. With depth instead they fought with the wall and with each other.
+    float pull = 0.0f;
+    {
+        static int frame = -1, order;
+        if (frame != g_frame) { frame = g_frame; order = 0; }
+        order++;
+        float o[3];
+        view_of(cam, M + 9, o);
+        if (o[2] > 1.0f) {
+            float d = -(float)rds16(obj + 0x44) * 8.0f + 2.0f + (order < 400 ? (400 - order) * 0.01f : 0.0f);
+            pull = d / o[2];
+            pull = pull < -0.05f ? -0.05f : pull > 0.3f ? 0.3f : pull;
+        }
+    }
+    group_begin(cap, (uint64_t)obj, M, GK_NORMAL, pull);
     static std::vector<u32> mine;   // faces drawn natively (switched off for the original)
     mine.clear();
     int left = 0, base = 0;
