@@ -311,11 +311,15 @@ static void hook_relocate(Ctx* c, RecompFn orig) {
 // For the 16:9 view the rays are spread horizontally so the extra screen area gets its geometry.
 extern float g_ws_scale;
 int g_ws_frustum = 1;
+// option frustum_margin: wider than the picture - cells are tested by their corners, and the test runs
+// in the game logic with the camera of the frame before (a turning view reveals the side it turns to)
+float g_frustum_margin = 1.3f;
 static void hook_frustum_corners(Ctx* c, RecompFn orig) {
     orig(c);
     extern float g_fov_mult;
     float kx = g_fov_mult, ky = g_fov_mult;   // a wider field of view (mods) widens the rays both ways
-    if (g_ws_frustum && g_ws_scale != 1.0f) kx *= 1.0f / g_ws_scale * 1.06f;   // a little margin: cells are tested by their corners
+    if (g_ws_frustum && g_ws_scale != 1.0f) kx *= 1.0f / g_ws_scale;
+    kx *= g_frustum_margin;   // a little margin: cells are tested by their corners
     if (kx == 1.0f && ky == 1.0f) return;
     for (u32 a = 0x800f8b30; a < 0x800f8b30 + 32; a += 8) {
         int x = (int)((s16)mem_r16(c, a) * kx), y = (int)((s16)mem_r16(c, a + 2) * ky);

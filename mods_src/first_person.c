@@ -483,7 +483,10 @@ static void visibility_hook(uint32_t* r, C12OrigFn orig) {
     uint32_t vo = is_ptr(cam) ? (uint32_t)r32(cam + 0x40) : 0;
     if (!was_on || !vm_ok || !is_ptr(vo) || in_render) { orig(r); return; }
     int32_t keep[3];
-    for (int i = 0; i < 3; i++) { keep[i] = r32(vo + 0x20 + i * 4); w32(vo + 0x20 + i * 4, (int32_t)vm_eye[i]); }
+    /* the test runs from a point a little behind the eye: the frustum's footprint starts at its apex,
+     * so seen from inside the head it is too narrow beside the hero and cells right next to him at the
+     * screen's edges (a wall at arm's length) were left out */
+    for (int i = 0; i < 3; i++) { keep[i] = r32(vo + 0x20 + i * 4); w32(vo + 0x20 + i * 4, (int32_t)(vm_eye[i] - vm_f[i] * 120.0f)); }
     orig(r);
     for (int i = 0; i < 3; i++) w32(vo + 0x20 + i * 4, keep[i]);
 }
