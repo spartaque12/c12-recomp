@@ -663,6 +663,8 @@ static int meshfx_do(Ctx* c, RecompFn orig) {
     // control panel's power bars, their dark covers and lamps), and the ordering table puts them in
     // front by the instance's slot bias (obj+0x44, slot = z >> 3 + bias) and, in one slot, the one
     // handled first in front. With depth instead they fought with the wall and with each other.
+    // The base is 12 units: a control panel's arrow screens lie 4-8 units off the level's screen
+    // faces they cover (with less, the left screen showed the level's picture, not the live one).
     float pull = 0.0f;
     {
         static int frame = -1, order;
@@ -671,7 +673,7 @@ static int meshfx_do(Ctx* c, RecompFn orig) {
         float o[3];
         view_of(cam, M + 9, o);
         if (o[2] > 1.0f) {
-            float d = -(float)rds16(obj + 0x44) * 8.0f + 2.0f + (order < 400 ? (400 - order) * 0.01f : 0.0f);
+            float d = -(float)rds16(obj + 0x44) * 8.0f + 12.0f + (order < 400 ? (400 - order) * 0.01f : 0.0f);
             pull = d / o[2];
             pull = pull < -0.05f ? -0.05f : pull > 0.3f ? 0.3f : pull;
         }
