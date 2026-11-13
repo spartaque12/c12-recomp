@@ -71,7 +71,8 @@ static float atan2_4096(float y, float x) {
 }
 static int strafe = 1;             /* keep the view direction while moving (camera auto-centre off) */
 static int clean_scope = 1;        /* the game's own scope view (R2) without its overlay and sound */
-static int viewmodel = 1;          /* draw the weapon at a fixed place in front of the eye */
+static int viewmodel = 0;          /* draw the weapon at a fixed place in front of the eye (off: the game's own hold) */
+static int give_weapons;           /* setting: give every weapon with full ammo (once) */
 static float vm_right = 60.0f, vm_down = 70.0f, vm_fwd = 170.0f;
 static float vm_yaw = 0.0f, vm_pitch = 0.0f;   /* degrees */
 
@@ -413,6 +414,16 @@ static int vr_head(float* yaw_u, float* pitch_u, float basis[4]) {
  * the game's own angle-to-matrix routine (800a1db8). The game's camera normally eases towards a
  * target direction; that easing is what made mouse look feel slow. */
 static void camera_hook(uint32_t* r, C12OrigFn orig) {
+    if (give_weapons && was_on) {
+        /* the game's own cheats, while the hero is playable: 8001c74c gives every weapon, 8001ca2c fills all ammo */
+        uint32_t keep[32];
+        memcpy(keep, r, sizeof keep);
+        api->call(0x8001c74c);
+        api->call(0x8001ca2c);
+        memcpy(r, keep, sizeof keep);
+        give_weapons = 0;
+        api->log("gave every weapon with full ammo");
+    }
     uint32_t cam = r[4];
     uint32_t hero = (uint32_t)r32(0x800efdb8), vo = (uint32_t)r32(cam + 0x40);
     /* the game updates more than one camera per frame; only the one that follows the hero is ours */
@@ -524,7 +535,9 @@ static void render_hook(uint32_t* r, C12OrigFn orig) {
 static void weapon_hook(uint32_t* r, C12OrigFn orig) {
     uint32_t hero = (uint32_t)r32(0x800efdb8), cur = (uint32_t)r32(0x800efdc8);
     orig(r);
-    if (was_on && vm_ok && viewmodel && is_ptr(hero) && is_ptr(cur) && cur == (uint32_t)r32(hero + 0x54) && (uint32_t)r32(cur + 0x50) == hero)
+    C12VrPose vh;
+    int vr_hand = api->version >= 5 && api->vr_get_hand(1, &vh);   /* VR: the weapon follows the controller */
+    if (was_on && vm_ok && (viewmodel || vr_hand) && is_ptr(hero) && is_ptr(cur) && cur == (uint32_t)r32(hero + 0x54) && (uint32_t)r32(cur + 0x50) == hero)
         place_weapon(cur);
 }
 
@@ -641,7 +654,8 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_bool("face_view", "Hero faces where you look (shots go to the crosshair)", &face_view);
     api->setting_bool("hide_body", "Hide the hero's body", &hide_body);
     api->setting_bool("clean_scope", "Scope view (R2) without scan lines, tint and hum", &clean_scope);
-    api->setting_bool("viewmodel", "Weapon view model", &viewmodel);
+    api->setting_bool("give_weapons", "Give all weapons and ammo (cheat, once)", &give_weapons);
+    api->setting_bool("viewmodel2", "Weapon view model (machine gun only)", &viewmodel);
     api->setting_float("vm_right", "Weapon: right / left", &vm_right, -200.0f, 200.0f);
     api->setting_float("vm_down", "Weapon: down / up", &vm_down, -200.0f, 200.0f);
     api->setting_float("vm_fwd", "Weapon: forward / back", &vm_fwd, 0.0f, 400.0f);
