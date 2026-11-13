@@ -252,7 +252,7 @@ void plat_input_poll() {
                 // the turret's angles are not wrapped; the game clamps them to the turret's own
                 // limits (its description at 800f0cb4+0xbc) on its next update, and turns the gun
                 yaw = (s16)(yaw + iy);
-                pitch = (s16)(pitch - ip);   // its pitch runs the other way to the scope's
+                pitch = (s16)(pitch + ip);   // same sense as the scope's (and its invert setting)
                 memcpy(g_ram + 0xf0ca6, &pitch, 2);
                 memcpy(g_ram + 0xf0ca8, &yaw, 2);
                 goto aim_done;
