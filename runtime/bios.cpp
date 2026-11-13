@@ -473,6 +473,16 @@ void bios_init() {
     }
     for (u32 i = 0; i < 0x20; i++) wr32(K_C0TAB + i * 4, 0x80000000u + 0x4000 + i * 16);
     for (u32 a = 0x2000; a < 0x5000; a += 8) { wr32(0x80000000u + a, 0x03E00008); wr32(0x80000004u + a, 0); }
+    // C0 entry 6 is the exception handler. The pad library (800b8910) patches it: it takes the address
+    // built by the handler's instructions at +0x70/+0x74 (lui/addiu immediates) and copies its hook to
+    // that address + 0x28. With plain stubs there it decoded to 0x00080000 and wrote into the game's own
+    // code at 80080028 (effect drawing), which then jumped into the pad routine and hung (black screen,
+    // sound going on). The handler shell now points it at a scratch area of its own (never executed,
+    // the HLE handles exceptions natively).
+    for (u32 a = 0x5000; a < 0x5100; a += 8) { wr32(0x80000000u + a, 0x03E00008); wr32(0x80000004u + a, 0); }
+    wr32(0x80005070, 0x3C1A8000);   // lui   k0, 0x8000
+    wr32(0x80005074, 0x275A5100);   // addiu k0, k0, 0x5100   -> patch lands at 0x80005128
+    wr32(K_C0TAB + 6 * 4, 0x80005000);
     // device table: libmcrd looks up the "bu" device and temporarily swaps its firstfile handler
     wr32(0x80000150, 0x80006000);
     wr32(0x80000154, 0x50 * 2);
