@@ -74,14 +74,14 @@ static GpuVtx make_vtx(u32 xy, u32 rgb, u32 uv) {
     v.px = (float)v.x;
     v.py = (float)v.y;
     v.pw = 0;
-    extern bool prec_get(u32 word, float& x, float& y, float& dx);
-    float fx, fy, fdx = 0.0f;
+    extern bool prec_get(u32 word, float& x, float& y, float& dx, float& w);
+    float fx, fy, fdx = 0.0f, fw = 0.0f;
     extern int g_prec_hits, g_prec_miss;
-    bool got = g_list_3d && prec_get(xy, fx, fy, fdx);
+    bool got = g_list_3d && prec_get(xy, fx, fy, fdx, fw);
     if (got && !(fabsf(fx - sext11(xy & 0x7FF)) < 8.0f && fabsf(fy - sext11((xy >> 16) & 0x7FF)) < 8.0f)) g_prec_miss++;
     if (got && fabsf(fx - sext11(xy & 0x7FF)) < 8.0f && fabsf(fy - sext11((xy >> 16) & 0x7FF)) < 8.0f) {
         g_prec_hits++;
-        v.pw = 1.0f;   // a projected 3D point (the widescreen layout leaves the polygon alone)
+        v.pw = fw > 0.0f ? fw : 1.0f;   // its depth: perspective-correct texturing (and the layout leaves it alone)
         v.px = fx + fdx + g_off_x;
         v.x = (int)floorf(v.px + 0.5f);
         v.py = fy + g_off_y;

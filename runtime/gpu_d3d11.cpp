@@ -400,13 +400,15 @@ static void hw_tri(const GpuVtx* v, const GpuState& s) {
     // primitives of the world list are hidden behind native geometry drawn this frame, at the depth of
     // their sort slot
     int dm = (g_n3_depth_ps1 && g_prim_depth > 0.0f && depth_valid()) ? DM_TEST : DM_OFF;
+    bool persp = v[0].pw > 0.0f && v[1].pw > 0.0f && v[2].pw > 0.0f;
     begin_prim(s, kind_of(s) | dm << 3, 3, minx, miny, maxx + 1, maxy + 1, hd ? hd->srv : nullptr);
     for (int i = 0; i < 3; i++) {
         Vtx& o = verts[nverts++];
         o.x = XS(s, v[i].px);
         o.y = v[i].py;
-        o.w = 1.0f;
-        o.z = dm ? N3_DEPTH_K / g_prim_depth : 0.0f;   // the native depth mapping, K / z
+        // points with a known depth (the menus' 3D icons): perspective-correct texturing
+        o.w = persp ? v[i].pw : 1.0f;
+        o.z = dm ? N3_DEPTH_K / g_prim_depth * o.w : 0.0f;   // the native depth mapping, K / z
         u32 col = s.gouraud ? v[i].rgb : v[0].rgb;
         if (s.textured && s.raw) col = 0x808080;
         o.color = col | 0xFF000000u;

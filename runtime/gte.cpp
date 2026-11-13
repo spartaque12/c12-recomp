@@ -112,20 +112,20 @@ int g_ws_view = 0;   // experimental: expose squeezed view-space X to the game
 // native renderer): while g_prec_on, every projection's exact screen position is kept, looked up by its
 // integer screen word when the polygon is drawn (a frame later). Nothing else uses it.
 bool g_prec_on;
-struct PrecEnt { u32 word; float x, y, dx; int frame; };
+struct PrecEnt { u32 word; float x, y, dx, w; int frame; };
 static PrecEnt g_prec[4096];
 int g_prec_puts, g_prec_hits, g_prec_miss;
 // dx: in widescreen the menus' panels are squeezed around the screen's centre (the HUD layout), the
 // icons only around their view's own centre (the projection): this shift puts them back in their boxes
-static void prec_put(u32 word, float x, float y, float dx) {
+static void prec_put(u32 word, float x, float y, float dx, float w) {
     g_prec_puts++;
     PrecEnt& e = g_prec[(word * 2654435761u) >> 20];
-    e.word = word; e.x = x; e.y = y; e.dx = dx; e.frame = g_frame;
+    e.word = word; e.x = x; e.y = y; e.dx = dx; e.w = w; e.frame = g_frame;
 }
-bool prec_get(u32 word, float& x, float& y, float& dx) {
+bool prec_get(u32 word, float& x, float& y, float& dx, float& w) {
     const PrecEnt& e = g_prec[(word * 2654435761u) >> 20];
     if (e.word != word || g_frame - e.frame > 4) return false;
-    x = e.x; y = e.y; dx = e.dx;
+    x = e.x; y = e.y; dx = e.dx; w = e.w;
     return true;
 }
 
@@ -180,7 +180,7 @@ static void rtp(Ctx* c, int v, int sh, int lm, bool last) {
         if (vz > 0.5) {
             double pq = (double)h / vz;
             prec_put((u32)D[14], (float)(C[24] / 65536.0 + vx * g_ws_scale * pq), (float)(C[25] / 65536.0 + vy * pq),
-                     (float)((1.0 - g_ws_scale) * (256.0 - C[24] / 65536.0)));
+                     (float)((1.0 - g_ws_scale) * (256.0 - C[24] / 65536.0)), (float)vz);
         }
     }
     g_gte_h = (float)h;
