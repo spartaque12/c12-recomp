@@ -73,6 +73,12 @@ static GpuVtx make_vtx(u32 xy, u32 rgb, u32 uv) {
     v.px = (float)v.x;
     v.py = (float)v.y;
     v.pw = 0;
+    extern bool prec_get(u32 word, float& x, float& y);
+    float fx, fy;
+    if (prec_get(xy, fx, fy) && fabsf(fx - sext11(xy & 0x7FF)) < 1.5f && fabsf(fy - sext11((xy >> 16) & 0x7FF)) < 1.5f) {
+        v.px = fx + g_off_x;
+        v.py = fy + g_off_y;
+    }
     return v;
 }
 

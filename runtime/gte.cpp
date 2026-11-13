@@ -108,6 +108,23 @@ int g_ws_flags = 1;  // saturation flags as in the original 4:3 projection
 float g_fov_mult = 1.0f;   // field-of-view multiplier set by mods (1 = the game's own)
 float g_gte_h = 1.0f;   // current projection distance
 int g_ws_view = 0;   // experimental: expose squeezed view-space X to the game
+// Sub-pixel positions for the menus' 3D item icons (drawn by the game in a view of their own, not by the
+// native renderer): while g_prec_on, every projection's exact screen position is kept, looked up by its
+// integer screen word when the polygon is drawn (a frame later). Nothing else uses it.
+bool g_prec_on;
+struct PrecEnt { u32 word; float x, y; int frame; };
+static PrecEnt g_prec[4096];
+static void prec_put(u32 word, float x, float y) {
+    PrecEnt& e = g_prec[(word * 2654435761u) >> 20];
+    e.word = word; e.x = x; e.y = y; e.frame = g_frame;
+}
+bool prec_get(u32 word, float& x, float& y) {
+    const PrecEnt& e = g_prec[(word * 2654435761u) >> 20];
+    if (e.word != word || g_frame - e.frame > 4) return false;
+    x = e.x; y = e.y;
+    return true;
+}
+
 static void rtp(Ctx* c, int v, int sh, int lm, bool last) {
     s32 vx = VX(v), vy = VY(v), vz = VZ(v);
     s64 m[3];
@@ -154,6 +171,7 @@ static void rtp(Ctx* c, int v, int sh, int lm, bool last) {
     D[12] = D[13];
     D[13] = D[14];
     D[14] = (s32)(((u32)isy << 16) | ((u32)isx & 0xFFFF));
+    if (g_prec_on) prec_put((u32)D[14], (float)(((s64)C[24] + ir1 * q) / 65536.0), (float)(((s64)C[25] + IR2 * q) / 65536.0));
     g_gte_h = (float)h;
     if (last) {
         s64 d = chkF(c, (s64)C[28] + (s64)C[27] * q);

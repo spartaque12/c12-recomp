@@ -289,8 +289,14 @@ bool decals3d_capture(Ctx* c);
 static void hook_sky_draw(Ctx* c, RecompFn orig) { if (!sky3d_capture(c)) orig(c); }
 static void hook_shadow_draw(Ctx* c, RecompFn orig) { if (!shadow3d_capture(c, orig)) orig(c); }
 static void hook_decals_draw(Ctx* c, RecompFn orig) { if (!decals3d_capture(c)) orig(c); }
+bool settings_is_classic();
 static void hook_ptmodel_draw(Ctx* c, RecompFn orig) {
-    if (!ptmodel_capture(c)) orig(c);   // objects: drawn natively (level3d.cpp)
+    if (ptmodel_capture(c)) return;   // objects: drawn natively (level3d.cpp)
+    // the menus' item icons (a view of their own): the game draws them, keeping sub-pixel positions
+    extern bool g_prec_on;
+    g_prec_on = c->r[6] != mem_r32(c, 0x800efde0) && !settings_is_classic();
+    orig(c);
+    g_prec_on = false;
 }
 static void hook_meshfx_draw(Ctx* c, RecompFn orig) {
     if (!meshfx_capture(c, orig)) orig(c);
