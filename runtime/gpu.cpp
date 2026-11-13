@@ -1062,7 +1062,7 @@ void gpu_vblank() {
     extern bool vr_desktop_owns(const GpuDisplay& d);
     if (!vr_desktop_owns(d)) g_be->present(d);   // else the pictures come at the monitor's rate (vr.cpp)
     if (g_cfg.max_frames && g_frame >= g_cfg.max_frames) { logf("reached frame %d (audio queue %d ms)\n", g_frame, plat_audio_queued_ms()); exit(0); }
-    if (!g_cfg.shot_dir.empty() && g_cfg.shot_every && (g_frame % g_cfg.shot_every) == 0) {
+    if (!g_cfg.shot_dir.empty() && g_cfg.shot_every && (g_frame % g_cfg.shot_every) == 0 && g_frame >= g_shot_from) {
         extern char g_bb_shot[512];
         snprintf(g_bb_shot, sizeof g_bb_shot, "%s/w%06d.bmp", g_cfg.shot_dir.c_str(), g_frame);
     }

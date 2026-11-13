@@ -541,6 +541,20 @@ static void weapon_hook(uint32_t* r, C12OrigFn orig) {
         place_weapon(cur);
 }
 
+/* 80035d90(mode) opens the game's own views (1 = scope, 2 = turret) and starts the scope level, facing
+ * the hero's way. Its view is built from those angles before the mod's per-frame code runs again, so the
+ * first frames looked level and then jumped to where the first-person view had looked: the angles are
+ * set right here instead. */
+static void scope_open_hook(uint32_t* r, C12OrigFn orig) {
+    int mode = (int)r[4];
+    orig(r);
+    if (enabled && mode == 1 && was_on && last_view_a >= 0) {
+        int p = last_view_p > 780 ? 780 : last_view_p < -780 ? -780 : last_view_p;
+        w16(0x800f0ca8, last_view_a);
+        w16(0x800f0ca6, p);
+    }
+}
+
 /* 8005f380(desc, ...) queues a sound effect. Opening the scope view requests two: 800d24cc and
  * 800d24e8 (the switch-on blip and the hum that loops while the view is open). */
 static void sfx_hook(uint32_t* r, C12OrigFn orig) {
@@ -662,6 +676,7 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("vm_yaw", "Weapon: turn (degrees)", &vm_yaw, -180.0f, 180.0f);
     api->setting_float("vm_pitch", "Weapon: tilt (degrees)", &vm_pitch, -90.0f, 90.0f);
     api->hook(0x8005f380, sfx_hook);
+    api->hook(0x80035d90, scope_open_hook);
     if (api->version >= 3) api->on_state_loaded(state_loaded);
     return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook) && api->hook(0x8002c048, physics_hook) && api->hook(0x8003836c, render_hook) && api->hook(0x8002bb90, move_prep_hook) && api->hook(0x80022154, run_hook) && api->hook(0x8006540c, visibility_hook);
 }
