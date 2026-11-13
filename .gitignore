@@ -8,7 +8,7 @@ c12.exe
 c12.ini
 # build + test output
 build/
-c12.log
+*.log
 interp_entries.txt
 prims.txt
 shots*/

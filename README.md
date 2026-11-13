@@ -143,7 +143,8 @@ runtime (SteamVR, Oculus/Meta, WMR, Virtual Desktop...). Switch it on in the set
 * `texpage-*` and `vram-write-*` replacement images are not used (only `texupload-*`).
 * The mask-bit test (a rarely used GPU feature) is not implemented in the D3D11 renderer.
 * 2D effects drawn inside the 3D scene (not through the HUD layer) are still stretched in widescreen.
-* Debug / tests: `--headless --hw --frames N --shots DIR --every K --input script.txt` runs scripted tests;
+* Debug / tests: `--headless --hw --frames N --shots DIR --every K --input tests\input2.txt` runs scripted tests
+  (button scripts live in `tests\`);
   `--load_state FILE`, or `--state_file FILE` with `--save_state_at FRAME` / `--load_state_at FRAME`;
   `--store_watch ADDR` logs writes to a guest address with call stacks. Mods must be built with `/GS-`
   (see `c12_mod_api.h`).
