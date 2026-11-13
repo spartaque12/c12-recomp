@@ -135,9 +135,21 @@ runtime (SteamVR, Oculus/Meta, WMR, Virtual Desktop...). Switch it on in the set
   including the native stacks of its coroutines. A state therefore only loads into the same build of c12.exe with the
   same mods: rebuilding makes older states unusable. Loading a state doesn't touch the memory card.
 
-**Mods**
+**First-person mod**
+* Play the whole game from the hero's eyes with the normal controls. You get CS-style movement, direct mouse look and
+  shots that go to the crosshair. Climbing, ladders, ledges, crouching and gun turrets all work.
+* The view steps aside for cutscenes and menus. The hero's body is hidden.
+* Options: a clean scope view (R2) without the scan lines, tint and hum, field of view, eye height and crouch drop,
+  and walking speed while aiming.
+
+**VR mod**
+* Any OpenXR headset, with real stereo at the headset's refresh rate: the native 3D scene is drawn for each eye and
+  blended between game frames.
+* Head look, a floating HUD, and menus and films on a virtual screen.
+* Motion controllers, with the weapon in your hand and a laser that shows where shots go. Snap or smooth turn.
+
+**Modding**
 * Native DLL mods with hooks on any game function, a Mods tab with their settings, and disc file replacement.
-  The first-person mod and VR mod are described above.
 
 ## Notes
 
