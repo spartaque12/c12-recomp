@@ -122,6 +122,31 @@ static Capture* scene_cap(u32 view = 0) {
     return &n;
 }
 static const float k_ident[12] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
+// a transform between last frame's (a) and this frame's (b): the translation mixed linearly, the
+// rotation mixed and then made a rotation again (a linear mix of two rotations is shrunk - an object
+// spinning fast would pulse in size on every in-between frame), keeping each axis's own scale
+static void blend_M(const float a[12], const float b[12], float t, float o[12]) {
+    float m[9];
+    for (int i = 0; i < 9; i++) m[i] = a[i] + (b[i] - a[i]) * t;
+    for (int i = 9; i < 12; i++) o[i] = a[i] + (b[i] - a[i]) * t;
+    float c[3][3], len[3];
+    for (int k = 0; k < 3; k++) {   // columns = the model's axes
+        float la = sqrtf(a[k] * a[k] + a[3 + k] * a[3 + k] + a[6 + k] * a[6 + k]);
+        float lb = sqrtf(b[k] * b[k] + b[3 + k] * b[3 + k] + b[6 + k] * b[6 + k]);
+        len[k] = la + (lb - la) * t;
+        for (int i = 0; i < 3; i++) c[k][i] = m[i * 3 + k];
+    }
+    auto norm = [](float* v) { float l = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); if (l > 1e-6f) for (int i = 0; i < 3; i++) v[i] /= l; };
+    norm(c[0]);
+    float d = c[1][0] * c[0][0] + c[1][1] * c[0][1] + c[1][2] * c[0][2];
+    for (int i = 0; i < 3; i++) c[1][i] -= d * c[0][i];
+    norm(c[1]);
+    float x[3] = {c[0][1] * c[1][2] - c[0][2] * c[1][1], c[0][2] * c[1][0] - c[0][0] * c[1][2], c[0][0] * c[1][1] - c[0][1] * c[1][0]};
+    float dir = x[0] * c[2][0] + x[1] * c[2][1] + x[2] * c[2][2];   // keep a mirrored model mirrored
+    for (int i = 0; i < 3; i++) c[2][i] = dir < 0 ? -x[i] : x[i];
+    for (int k = 0; k < 3; k++)
+        for (int i = 0; i < 3; i++) o[i * 3 + k] = c[k][i] * len[k];
+}
 static Group& group_begin(Capture& cap, uint64_t key, const float M[12], int kind = GK_NORMAL, float bias = 0.0f) {
     Group g;
     g.key = key;
@@ -321,7 +346,7 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
                 if (q.key == g.key) { p = &q; li = (li + k + 1) % n; }
             }
             if (p && fabsf(p->M[9] - M[9]) + fabsf(p->M[10] - M[10]) + fabsf(p->M[11] - M[11]) < 1500.0f)
-                for (int i = 0; i < 12; i++) M[i] = (M[i] + p->M[i]) * 0.5f;
+                { float o[12]; blend_M(p->M, M, 0.5f, o); memcpy(M, o, sizeof o); }
         }
     }
     // the sky first, in a pass of its own (its depth buffer is cleared again for the scene)
@@ -419,7 +444,7 @@ void level3d_vr_emit(float t, const VrEyeXf& xf, int cx1, int cy1, int cx2, int 
                 if (q.key == g.key) { p = &q; li = (li + k + 1) % n; }
             }
             if (p && fabsf(p->M[9] - M[9]) + fabsf(p->M[10] - M[10]) + fabsf(p->M[11] - M[11]) < 1500.0f)
-                for (int i = 0; i < 12; i++) M[i] = p->M[i] + (M[i] - p->M[i]) * t;
+                { float o[12]; blend_M(p->M, M, t, o); memcpy(M, o, sizeof o); }
         }
     }
     N3View v = {};
