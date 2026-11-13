@@ -108,6 +108,7 @@ int g_ws_flags = 1;  // saturation flags as in the original 4:3 projection
 float g_fov_mult = 1.0f;   // field-of-view multiplier set by mods (1 = the game's own)
 float g_gte_h = 1.0f;   // current projection distance
 int g_ws_view = 0;   // experimental: expose squeezed view-space X to the game
+int g_sprite_trz = 0;   // depth of a screen-facing effect's sprite being drawn (0 = none), see rtp()
 // Sub-pixel positions for the menus' 3D item icons (drawn by the game in a view of their own, not by the
 // native renderer): while g_prec_on, every projection's exact screen position is kept, looked up by its
 // integer screen word when the polygon is drawn (a frame later). Nothing else uses it.
@@ -154,18 +155,25 @@ static void rtp(Ctx* c, int v, int sh, int lm, bool last) {
     D[18] = D[19];
     D[19] = lmD(c, (s32)(m[2] >> 12));
     u32 h = (u16)C[26];
-    if (g_fov_mult != 1.0f) { h = (u32)(h / g_fov_mult + 0.5f); if (h < 1) h = 1; if (h > 65535) h = 65535; }   // mods: field of view
+    // a screen-facing effect's sprite (hook_meshfx_draw): its translation is already a screen offset that
+    // went through the widescreen squeeze and field of view once; only the sprite's own extent gets them
+    bool spr = g_sprite_trz && (s32)C[7] == g_sprite_trz;
+    if (g_fov_mult != 1.0f && !spr) { h = (u32)(h / g_fov_mult + 0.5f); if (h < 1) h = 1; if (h > 65535) h = 65535; }   // mods: field of view
     s64 q = gte_divide(c, h, (u32)D[19]);
-    s32 ir1 = IR1;
-    if (g_ws_scale != 1.0f) {
+    s32 ir1 = IR1, ir2 = IR2;
+    if (spr) {
+        float k = g_fov_mult > 0.0f ? 1.0f / g_fov_mult : 1.0f;
+        ir1 = (s32)C[5] + (s32)lrintf((float)(IR1 - (s32)C[5]) * g_ws_scale * k);
+        ir2 = (s32)C[6] + (s32)lrintf((float)(IR2 - (s32)C[6]) * k);
+    } else if (g_ws_scale != 1.0f) {
         ir1 = (s32)lrintf(ir1 * g_ws_scale);
         // also report the squeezed view-space X, so game code that culls on it keeps the wider view
         if (g_ws_view) { IR1 = ir1; MAC1 = (s32)lrintf(MAC1 * g_ws_scale); }
     }
     s64 sx = chkF(c, (s64)C[24] + ir1 * q) >> 16;
-    s64 sy = chkF(c, (s64)C[25] + IR2 * q) >> 16;
+    s64 sy = chkF(c, (s64)C[25] + ir2 * q) >> 16;
     s32 isx, isy = lmG(c, 2, sy);
-    if (ir1 != IR1 && g_ws_flags) {
+    if (ir1 != IR1 && g_ws_flags && !spr) {
         // Widescreen: the game uses the X-saturation flag to throw away polygons that reach far
         // off-screen (e.g. the hero's head while the camera sits inside it). Raise the flag exactly
         // when the original 4:3 projection would have, but output the squeezed coordinate.
@@ -183,7 +191,7 @@ static void rtp(Ctx* c, int v, int sh, int lm, bool last) {
                      (float)((1.0 - g_ws_scale) * (256.0 - C[24] / 65536.0)), (float)vz);
         }
     }
-    g_gte_h = (float)h;
+    if (!spr) g_gte_h = (float)h;
     if (last) {
         s64 d = chkF(c, (s64)C[28] + (s64)C[27] * q);
         MAC0 = (s32)d;

@@ -299,7 +299,18 @@ static void hook_ptmodel_draw(Ctx* c, RecompFn orig) {
     g_prec_on = false;
 }
 static void hook_meshfx_draw(Ctx* c, RecompFn orig) {
-    if (!meshfx_capture(c, orig)) orig(c);
+    if (meshfx_capture(c, orig)) return;
+    // Screen-facing effects (flag 4, e.g. lamp glows): the game projects the origin to a screen point,
+    // then places a sprite there (translation = screen offset, depth view +0xc4) and projects it again.
+    // The widescreen squeeze and a mod's field of view went into both projections, so the glow's
+    // distance from the screen centre was scaled twice (glows beside their lamps, pulled toward the
+    // centre). The second projection is marked by its depth: gte.cpp keeps its offset as it is.
+    extern int g_sprite_trz;
+    u32 obj = c->r[4], vw = mem_r32(c, 0x1f800060);
+    if ((obj >> 24) != 0x80 || (vw >> 24) != 0x80 || (mem_r32(c, obj + 0xc) & 6) != 4) { orig(c); return; }
+    g_sprite_trz = (s32)mem_r16(c, vw + 0xc4);
+    orig(c);
+    g_sprite_trz = 0;
 }
 
 // ---- overlays ----------------------------------------------------------------------------------
