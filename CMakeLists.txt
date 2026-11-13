@@ -19,6 +19,6 @@ target_link_libraries(c12 PRIVATE xinput winmm d3d11 dxgi d3dcompiler ole32 user
 # GUI program (no console window on double-click); still a normal main()
 # save states copy native stacks holding return addresses: c12.exe must always load at the same
 # address (no ASLR) and the stacks are switched by hand (no CET shadow stack)
-target_link_options(c12 PRIVATE /STACK:67108864 /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /DYNAMICBASE:NO /CETCOMPAT:NO)
+target_link_options(c12 PRIVATE /STACK:67108864 /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /DYNAMICBASE:NO /CETCOMPAT:NO /PDBALTPATH:c12.pdb)
 # a copy next to c12.ini so it can simply be double-clicked from the project folder
 add_custom_command(TARGET c12 POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:c12> ${CMAKE_SOURCE_DIR}/c12.exe)

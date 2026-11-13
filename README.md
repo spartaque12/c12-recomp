@@ -4,10 +4,16 @@ The game's MIPS executable is translated ahead of time to C (`gen/`), compiled w
 against a native runtime (`runtime/`). No game data is shipped: everything is read from your own
 disc image (`cue=` in `c12.ini`).
 
-## Setup (you need your own disc)
+## Download (you need your own disc)
 
-This repository contains **no game data and no game code**: the recompiled sources (`gen/`) are produced on your
-machine from your own disc image of the European release (SCES-03364).
+Get the ready-to-play build from [Releases](https://github.com/spartaque12/c12-recomp/releases/latest): unzip it,
+run `c12.exe` and point it at your `.cue` file of the European release (SCES-03364). The release's `c12.exe` contains
+the game's recompiled code; no game data is included.
+
+## Build from source
+
+The repository itself contains **no game data and no game code**: the recompiled sources (`gen/`) are produced on
+your machine from your own disc image.
 
     python tools\extract_disc.py "<Track 1>.bin" disc     # extract the disc's files once
     copy c12.ini.example c12.ini                           # then set cue= to your .cue
