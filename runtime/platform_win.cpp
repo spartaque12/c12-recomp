@@ -179,6 +179,11 @@ void plat_input_poll() {
     }
     // mouse look: mouse speed becomes right-stick deflection (the game's camera is rate controlled).
     // While the first-person view button (R2) is held the same motion also drives the left stick.
+    // manning a gun turret (view mode 800f0ca4 = 2): the mouse aims it like the first-person view
+    s16 view_mode;
+    memcpy(&view_mode, g_ram + 0xf0ca4, 2);
+    bool turret = view_mode == 2;
+    bool aiming = (down & (1u << 9)) || turret;
     if (focus && g_cfg.mouse && g_captured) {
         long dx = g_mouse_dx, dy = g_mouse_dy;
         g_mouse_dx = g_mouse_dy = 0;
@@ -192,7 +197,7 @@ void plat_input_poll() {
             return (int)(d > 127 ? 127 : d < -127 ? -127 : d);
         };
         int sx = stick(g_mx_f, g_cfg.mouse_sens), sy = stick(g_my_f, g_cfg.mouse_sens);
-        if (down & (1u << 9)) {
+        if (aiming) {
             // first-person view (R2 held): the game aims with the left stick, and directly
             // (stick right = look right), unlike the pull-style third-person camera
             int k = g_cfg.mouse_aim_invert ? 1 : -1;
@@ -218,9 +223,9 @@ void plat_input_poll() {
             if (sy) ax[1] = (u8)(128 + sy);
         }
     } else g_mouse_dx = g_mouse_dy = 0;
-    if (g_cfg.mouse_direct_cam && !(down & (1u << 9))) { g_cam_mx += smx; g_cam_my += smy; }   // scripted mouse (tests)
-    if (g_cfg.mouse_direct_aim && (down & (1u << 9))) { g_aim_mx += smx; g_aim_my += smy; }
-    if (g_cfg.mouse_direct_aim && (down & (1u << 9)) && (g_aim_mx || g_aim_my)) {
+    if (g_cfg.mouse_direct_cam && !aiming) { g_cam_mx += smx; g_cam_my += smy; }   // scripted mouse (tests)
+    if (g_cfg.mouse_direct_aim && aiming) { g_aim_mx += smx; g_aim_my += smy; }
+    if (g_cfg.mouse_direct_aim && aiming && (g_aim_mx || g_aim_my)) {
         // True mouse aim: add the movement straight to the scope view's angles (s16, 4096 per turn;
         // pitch at 800f0ca6, yaw at 800f0ca8). The level code turns the hero (and so his shots) only
         // when its own input turned the view, so his rotation - a turn about the vertical axis by
@@ -236,6 +241,15 @@ void plat_input_poll() {
             s16 yaw, pitch;
             memcpy(&pitch, g_ram + 0xf0ca6, 2);
             memcpy(&yaw, g_ram + 0xf0ca8, 2);
+            if (turret) {
+                // the turret's angles are not wrapped; the game clamps them to the turret's own
+                // limits (its description at 800f0cb4+0xbc) on its next update, and turns the gun
+                yaw = (s16)(yaw + iy);
+                pitch = (s16)(pitch - ip);   // its pitch runs the other way to the scope's
+                memcpy(g_ram + 0xf0ca6, &pitch, 2);
+                memcpy(g_ram + 0xf0ca8, &yaw, 2);
+                goto aim_done;
+            }
             yaw = (s16)(((yaw + iy) & 0xfff));
             int np = pitch + ip;
             if (np > 780) np = 780;
@@ -265,7 +279,8 @@ void plat_input_poll() {
                 }
             }
         }
-    } else if (!(down & (1u << 9))) g_aim_mx = g_aim_my = 0;
+    } else if (!aiming) g_aim_mx = g_aim_my = 0;
+aim_done:
     { extern void vr_pad_merge(u32& down, u8 ax[4]); u32 d32 = down; vr_pad_merge(d32, ax); down = (u16)d32; }
     g_user_buttons = down;
     memcpy(g_user_axes, ax, 4);
