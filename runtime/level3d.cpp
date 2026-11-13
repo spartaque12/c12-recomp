@@ -58,10 +58,11 @@ struct Camera { float R[9]; float eye[3]; float h, ofx, ofy; float sx = 1.0f, sy
 // against the rest). bias: the group is pulled toward the eye by this fraction of its depth (decals,
 // shadows lying on a surface; the screen position does not change).
 enum { GK_NORMAL, GK_SKY };
-struct Group { uint64_t key; float M[12]; u32 first, count; int kind; float bias; float sxy; };   // sxy: sky only, camera x/y scale   // M: R row-major 3x3, then t
+struct Group { uint64_t key; float M[12]; u32 first, count; int kind; float bias; float sxy; bool has_root; float root[12]; };   // root: the whole model's transform (object parts)   // sxy: sky only, camera x/y scale   // M: R row-major 3x3, then t
 struct Capture {
     bool valid = false, drawn = false;
     int vk = 0;                      // the view: 0 the main (world) view, 1 another (the menus' item icons)
+    int frame = 0;                   // when it was started (another view's captures expire)
     float basis[4] = {0, 0, 0, 1};   // VR: head orientation the game camera was built from (x, y, z, w)
     u32 seq = 0;
     u32 ot_lo = 0, ot_hi = 0;    // address range of its ordering table
@@ -102,7 +103,7 @@ static Capture* scene_cap(u32 view = 0) {
     if (c.valid && !c.drawn && c.ot_lo == ot) return &c;
     g_cap_cur[vk] ^= 1;
     Capture& n = g_cap[vk * 2 + g_cap_cur[vk]];
-    n.valid = true; n.drawn = false; n.seq = ++g_cap_seq; n.vk = vk;
+    n.valid = true; n.drawn = false; n.seq = ++g_cap_seq; n.vk = vk; n.frame = g_frame;
     n.tris.clear(); n.groups.clear();
     n.ot_lo = ot;
     n.ot_hi = ot + rd16(view + 0x6c) * 4u;
@@ -122,6 +123,42 @@ static Capture* scene_cap(u32 view = 0) {
     return &n;
 }
 static const float k_ident[12] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
+static void m_mul(const float a[12], const float b[12], float o[12]) {   // a * b (affine)
+    float r[12];
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) r[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j];
+        r[9 + i] = a[i * 3] * b[9] + a[i * 3 + 1] * b[10] + a[i * 3 + 2] * b[11] + a[9 + i];
+    }
+    memcpy(o, r, sizeof r);
+}
+static bool m_inv(const float a[12], float o[12]) {
+    float d = a[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (a[3] * a[8] - a[5] * a[6]) + a[2] * (a[3] * a[7] - a[4] * a[6]);
+    if (fabsf(d) < 1e-9f) return false;
+    float id = 1.0f / d;
+    o[0] = (a[4] * a[8] - a[5] * a[7]) * id; o[1] = (a[2] * a[7] - a[1] * a[8]) * id; o[2] = (a[1] * a[5] - a[2] * a[4]) * id;
+    o[3] = (a[5] * a[6] - a[3] * a[8]) * id; o[4] = (a[0] * a[8] - a[2] * a[6]) * id; o[5] = (a[2] * a[3] - a[0] * a[5]) * id;
+    o[6] = (a[3] * a[7] - a[4] * a[6]) * id; o[7] = (a[1] * a[6] - a[0] * a[7]) * id; o[8] = (a[0] * a[4] - a[1] * a[3]) * id;
+    for (int i = 0; i < 3; i++) o[9 + i] = -(o[i * 3] * a[9] + o[i * 3 + 1] * a[10] + o[i * 3 + 2] * a[11]);
+    return true;
+}
+static void blend_M(const float a[12], const float b[12], float t, float o[12]);
+// A part of a moving model between two frames: the model's own transform is blended (a turning model's
+// parts then follow its turn on the arc, not on the chord - parts away from the pivot cut the corner and
+// a spinning model shook), and the part's place in the model is blended on its own.
+static void blend_group(const Group& a, const Group& b, float t, float o[12]) {
+    float ia[12], ib[12];
+    if (a.has_root && b.has_root && m_inv(a.root, ia) && m_inv(b.root, ib)) {
+        float ra[12], rb[12], rm[12], root[12];
+        m_mul(ia, a.M, ra);
+        m_mul(ib, b.M, rb);
+        blend_M(ra, rb, t, rm);
+        blend_M(a.root, b.root, t, root);
+        m_mul(root, rm, o);
+        return;
+    }
+    blend_M(a.M, b.M, t, o);
+}
+
 // a transform between last frame's (a) and this frame's (b): the translation mixed linearly, the
 // rotation mixed and then made a rotation again (a linear mix of two rotations is shrunk - an object
 // spinning fast would pulse in size on every in-between frame), keeping each axis's own scale
@@ -153,6 +190,7 @@ static Group& group_begin(Capture& cap, uint64_t key, const float M[12], int kin
     g.kind = kind;
     g.bias = bias;
     g.sxy = 1.0f;
+    g.has_root = false;
     memcpy(g.M, M, sizeof g.M);
     g.first = (u32)cap.tris.size();
     g.count = 0;
@@ -297,7 +335,7 @@ static void lerp_cam(const Camera& a, const Camera& b, float t, Camera& o) {
 bool level3d_listed(u32 slot_addr) {
     slot_addr &= 0x1FFFFF;
     if (!n3_available()) return false;
-    for (auto& c : g_cap) if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi) return true;
+    for (auto& c : g_cap) if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && !(c.vk && g_frame - c.frame > 4)) return true;
     return false;
 }
 
@@ -308,7 +346,7 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
     slot_addr &= 0x1FFFFF;
     Capture* cap = nullptr;
     for (auto& c : g_cap)
-        if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && (!cap || c.seq > cap->seq)) cap = &c;
+        if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && !(c.vk && g_frame - c.frame > 4) && (!cap || c.seq > cap->seq)) cap = &c;
     if (!cap || !n3_available()) return;
     Camera cam = cap->cam;
     int vk = cap->vk;
@@ -346,7 +384,7 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
                 if (q.key == g.key) { p = &q; li = (li + k + 1) % n; }
             }
             if (p && fabsf(p->M[9] - M[9]) + fabsf(p->M[10] - M[10]) + fabsf(p->M[11] - M[11]) < 1500.0f)
-                { float o[12]; blend_M(p->M, M, 0.5f, o); memcpy(M, o, sizeof o); }
+                { float o[12]; blend_group(*p, g, 0.5f, o); memcpy(M, o, sizeof o); }
         }
     }
     // the sky first, in a pass of its own (its depth buffer is cleared again for the scene)
@@ -444,7 +482,7 @@ void level3d_vr_emit(float t, const VrEyeXf& xf, int cx1, int cy1, int cx2, int 
                 if (q.key == g.key) { p = &q; li = (li + k + 1) % n; }
             }
             if (p && fabsf(p->M[9] - M[9]) + fabsf(p->M[10] - M[10]) + fabsf(p->M[11] - M[11]) < 1500.0f)
-                { float o[12]; blend_M(p->M, M, t, o); memcpy(M, o, sizeof o); }
+                { float o[12]; blend_group(*p, g, t, o); memcpy(M, o, sizeof o); }
         }
     }
     N3View v = {};
@@ -793,7 +831,16 @@ static int ptmodel_do(Ctx* c) {
         u32 d8 = (u32)rd16(p + 8) + rd16(p + 0xa);
         u32 nbase = arrB;
         uint64_t key = (1ull << 63) | ((uint64_t)model << 8) | (u32)pi;
-        group_begin(cap, key, M);
+        {
+            Group& gr = group_begin(cap, key, M);
+            u32 rp = rd32(model + 0x14);   // the model's root MATRIX (world)
+            if (ptr_ok(rp)) {
+                s32 rt[3];
+                rd_matrix(rp, gr.root, rt);
+                for (int k = 0; k < 3; k++) gr.root[9 + k] = (float)rt[k];
+                gr.has_root = true;
+            }
+        }
         u32 blk = rd32(g + 0x14);
         int nblocks = rd16(g + 8);
         for (int b = 0; b < nblocks && ptr_ok(blk); b++) {
