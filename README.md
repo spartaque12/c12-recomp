@@ -13,7 +13,8 @@ machine from your own disc image of the European release (SCES-03364).
     copy c12.ini.example c12.ini                           # then set cue= to your .cue
     powershell -File build.ps1                             # recompile + build (VS 2022 Build Tools, CMake, Ninja)
 
-Optional: put a DuckStation-style HD texture pack into the `hd_textures` folder.
+Recommended: the [HD texture pack](https://drive.usercontent.google.com/download?id=1V-yUDHBOOER6eeMb6mEISXu1vibefYNk&export=download).
+Unpack it so the `.png` files sit directly in the `hd_textures` folder, not in a subfolder (any DuckStation-style `texupload-*` pack works).
 
 ## Run / build
 
