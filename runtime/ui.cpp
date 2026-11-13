@@ -79,6 +79,7 @@ void settings_save(const char* path) {
     fprintf(f, "scale=%d            # internal resolution multiplier\n", c.scale);
     fprintf(f, "widescreen=%d       # 16:9 field of view\n", c.widescreen);
     fprintf(f, "hud_fix=%d          # keep HUD/menus in proportion in widescreen\n", g_hud_fix);
+    { extern float g_turret_sens; fprintf(f, "turret_sens=%.2f   # mouse turning speed on gun turrets\n", g_turret_sens); }
     { extern int g_smooth_present; fprintf(f, "smooth_present=%d   # a picture per monitor refresh, blended\n", g_smooth_present); }
     { extern int g_level3d; fprintf(f, "level3d=%d          # native 3D renderer for the level (depth buffer)\n", g_level3d); }
     fprintf(f, "filter=%d           # bilinear filtering of original textures\n", c.filter);
@@ -218,6 +219,7 @@ static void draw_menu() {
             bool b = g_cfg.mouse;
             if (ImGui::Checkbox("Mouse look (camera on the right stick)", &b)) g_cfg.mouse = b;
             ImGui::SliderFloat("Mouse sensitivity", &g_cfg.mouse_sens, 0.2f, 4.0f, "%.2f");
+            { extern float g_turret_sens; ImGui::SliderFloat("Turret mouse speed", &g_turret_sens, 0.05f, 1.5f, "%.2f"); }
             b = g_cfg.mouse_invert_x; if (ImGui::Checkbox("Invert mouse X", &b)) g_cfg.mouse_invert_x = b;
             ImGui::SameLine();
             b = g_cfg.mouse_invert_y; if (ImGui::Checkbox("Invert mouse Y", &b)) g_cfg.mouse_invert_y = b;

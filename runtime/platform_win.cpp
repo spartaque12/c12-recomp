@@ -24,6 +24,7 @@ bool g_window_resized;
 
 // raw mouse state (accumulated between pad polls)
 static long g_mouse_dx, g_mouse_dy;
+float g_turret_sens = 0.35f;   // mouse turning speed on gun turrets, relative to the first-person view
 long g_cam_mx, g_cam_my;   // raw mouse counts waiting for the game's next camera update
 long g_aim_mx, g_aim_my;   // same, for the scope view (R2)
 static int g_wheel_pulse;
@@ -242,6 +243,12 @@ void plat_input_poll() {
             memcpy(&pitch, g_ram + 0xf0ca6, 2);
             memcpy(&yaw, g_ram + 0xf0ca8, 2);
             if (turret) {
+                // the turret looks through a zoomed view: the same turn sweeps much more of the
+                // screen, so it turns slower (g_turret_sens, default 0.35)
+                extern float g_turret_sens;
+                static float ty, tp;
+                ty += iy * g_turret_sens; tp += ip * g_turret_sens;
+                iy = (int)ty; ip = (int)tp; ty -= iy; tp -= ip;
                 // the turret's angles are not wrapped; the game clamps them to the turret's own
                 // limits (its description at 800f0cb4+0xbc) on its next update, and turns the gun
                 yaw = (s16)(yaw + iy);

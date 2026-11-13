@@ -332,10 +332,14 @@ static void lerp_cam(const Camera& a, const Camera& b, float t, Camera& o) {
 }
 
 // the display list this ordering-table slot belongs to has a native scene
+// A capture belongs to the picture being drawn only if the game rendered it lately: the ordering
+// table memory is reused by screens without a 3D scene (briefings, menus after quitting a level),
+// which must not get an old scene drawn over them. Menu icons (vk 1) are dropped sooner.
+static bool fresh(const Capture& c) { return g_frame - c.frame <= (c.vk ? 4 : 8); }
 bool level3d_listed(u32 slot_addr) {
     slot_addr &= 0x1FFFFF;
     if (!n3_available()) return false;
-    for (auto& c : g_cap) if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && !(c.vk && g_frame - c.frame > 4)) return true;
+    for (auto& c : g_cap) if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && fresh(c)) return true;
     return false;
 }
 
@@ -346,7 +350,7 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
     slot_addr &= 0x1FFFFF;
     Capture* cap = nullptr;
     for (auto& c : g_cap)
-        if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && !(c.vk && g_frame - c.frame > 4) && (!cap || c.seq > cap->seq)) cap = &c;
+        if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && fresh(c) && (!cap || c.seq > cap->seq)) cap = &c;
     if (!cap || !n3_available()) return;
     Camera cam = cap->cam;
     int vk = cap->vk;
@@ -429,7 +433,7 @@ bool level3d_vr_snapshot(u32 slot_addr) {
     slot_addr &= 0x1FFFFF;
     Capture* cap = nullptr;
     for (auto& c : g_cap)
-        if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && (!cap || c.seq > cap->seq)) cap = &c;
+        if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && fresh(c) && (!cap || c.seq > cap->seq)) cap = &c;
     if (!cap) return false;
     SnapSet& S = g_snap[cap->vk];
     if (cap->seq == S.seq && S.s[1].valid) return true;
@@ -445,7 +449,7 @@ bool level3d_vr_snapshot(u32 slot_addr) {
 // the ordering table at slot_addr is the main (world) view's
 bool level3d_vr_main(u32 slot_addr) {
     slot_addr &= 0x1FFFFF;
-    for (auto& c : g_cap) if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi) return c.vk == 0;
+    for (auto& c : g_cap) if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && fresh(c)) return c.vk == 0;
     return false;
 }
 bool level3d_vr_cam(VrCamInfo& o) {

@@ -41,6 +41,7 @@ static void parse_kv(const std::string& k, const std::string& v) {
     else if (k == "state_file") { extern std::string g_state_file; g_state_file = v; }
     else if (k == "save_state_at") { extern int g_state_save_frame; g_state_save_frame = atoi(v.c_str()); }
     else if (k == "vr_test") { extern int g_vr_test; extern bool g_vr_active; g_vr_test = atoi(v.c_str()); g_vr_active = g_vr_test != 0; }
+    else if (k == "turret_sens") { extern float g_turret_sens; g_turret_sens = (float)atof(v.c_str()); }
     else if (k == "smooth_present") { extern int g_smooth_present; g_smooth_present = atoi(v.c_str()); }
     else if (k == "frustum_margin") { extern float g_frustum_margin; g_frustum_margin = (float)atof(v.c_str()); }
     else if (k == "n3_parts") { extern int g_n3_parts; g_n3_parts = atoi(v.c_str()); }
