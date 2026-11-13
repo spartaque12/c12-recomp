@@ -3,7 +3,7 @@
  * The game's own third-person camera keeps running (so movement, lock-on, shooting and every other
  * control work exactly as usual), but the eye is moved from behind the hero to his head. Unlike the
  * game's built-in scope view (R2) there is no scan-line overlay and no scope sound, and the hero can
- * run in any direction. The weapon is drawn as a view model at an adjustable place in front of the eye.
+ * run in any direction.
  *
  * What the mod knows about the game (European release, SCES-03364):
  *   80018320(cam)   camera update (runs for several cameras; the view object's +4 names the one
@@ -71,10 +71,6 @@ static float atan2_4096(float y, float x) {
 }
 static int strafe = 1;             /* keep the view direction while moving (camera auto-centre off) */
 static int clean_scope = 1;        /* the game's own scope view (R2) without its overlay and sound */
-static int viewmodel = 0;          /* draw the weapon at a fixed place in front of the eye (off: the game's own hold) */
-static int give_weapons;           /* setting: give every weapon with full ammo (once) */
-static float vm_right = 60.0f, vm_down = 70.0f, vm_fwd = 170.0f;
-static float vm_yaw = 0.0f, vm_pitch = 0.0f;   /* degrees */
 
 static int was_on;                 /* the mod changed the game's state last frame */
 static int saved_autocenter = -1;
@@ -346,28 +342,12 @@ static void apply(void) {
     vm_ok = 1;
 }
 
-/* Weapon axes = view axes, turned by the adjustable yaw (about "down") and pitch (about "right");
- * position = eye + offset along the view axes. */
-static void place_weapon(uint32_t gun) {
-    float cy = fcos(vm_yaw), sy = fsin(vm_yaw), cp = fcos(vm_pitch), sp = fsin(vm_pitch);
-    float ax[3][3];   /* ax[k] = k-th local axis of the weapon in world space */
-    for (int i = 0; i < 3; i++) {
-        float r1 = vm_r[i] * cy - vm_f[i] * sy, f1 = vm_r[i] * sy + vm_f[i] * cy;
-        ax[0][i] = r1;
-        ax[1][i] = vm_d[i] * cp - f1 * sp;
-        ax[2][i] = vm_d[i] * sp + f1 * cp;
-    }
-    /* VR with a tracked right controller: the weapon is in the hand, pointing where the controller points */
-    float base[3] = {vm_eye[0] + vm_r[0] * vm_right + vm_d[0] * vm_down + vm_f[0] * vm_fwd,
-                     vm_eye[1] + vm_r[1] * vm_right + vm_d[1] * vm_down + vm_f[1] * vm_fwd,
-                     vm_eye[2] + vm_r[2] * vm_right + vm_d[2] * vm_down + vm_f[2] * vm_fwd};
-    C12VrPose hand;
-    float hp[3], hr[9];
-    if (api->version >= 5 && api->vr_get_hand(1, &hand) && api->vr_to_world(&hand, hp, hr)) {
-        for (int k = 0; k < 3; k++)
-            for (int i = 0; i < 3; i++) ax[k][i] = hr[i * 3 + k];
-        for (int i = 0; i < 3; i++) base[i] = hp[i];
-    }
+/* VR: the weapon sits in the tracked right hand, pointing where the controller points. */
+static void place_weapon(uint32_t gun, const float hp[3], const float hr[9]) {
+    float ax[3][3], base[3];   /* ax[k] = k-th local axis of the weapon in world space */
+    for (int k = 0; k < 3; k++)
+        for (int i = 0; i < 3; i++) ax[k][i] = hr[i * 3 + k];
+    for (int i = 0; i < 3; i++) base[i] = hp[i];
     uint32_t model = model_of(gun);
     for (int i = 0; i < 3; i++) {
         int t = (int)base[i];
@@ -414,16 +394,6 @@ static int vr_head(float* yaw_u, float* pitch_u, float basis[4]) {
  * the game's own angle-to-matrix routine (800a1db8). The game's camera normally eases towards a
  * target direction; that easing is what made mouse look feel slow. */
 static void camera_hook(uint32_t* r, C12OrigFn orig) {
-    if (give_weapons && was_on) {
-        /* the game's own cheats, while the hero is playable: 8001c74c gives every weapon, 8001ca2c fills all ammo */
-        uint32_t keep[32];
-        memcpy(keep, r, sizeof keep);
-        api->call(0x8001c74c);
-        api->call(0x8001ca2c);
-        memcpy(r, keep, sizeof keep);
-        give_weapons = 0;
-        api->log("gave every weapon with full ammo");
-    }
     uint32_t cam = r[4];
     uint32_t hero = (uint32_t)r32(0x800efdb8), vo = (uint32_t)r32(cam + 0x40);
     /* the game updates more than one camera per frame; only the one that follows the hero is ours */
@@ -536,9 +506,10 @@ static void weapon_hook(uint32_t* r, C12OrigFn orig) {
     uint32_t hero = (uint32_t)r32(0x800efdb8), cur = (uint32_t)r32(0x800efdc8);
     orig(r);
     C12VrPose vh;
-    int vr_hand = api->version >= 5 && api->vr_get_hand(1, &vh);   /* VR: the weapon follows the controller */
-    if (was_on && vm_ok && (viewmodel || vr_hand) && is_ptr(hero) && is_ptr(cur) && cur == (uint32_t)r32(hero + 0x54) && (uint32_t)r32(cur + 0x50) == hero)
-        place_weapon(cur);
+    float hp[3], hr[9];
+    if (was_on && vm_ok && is_ptr(hero) && is_ptr(cur) && cur == (uint32_t)r32(hero + 0x54) && (uint32_t)r32(cur + 0x50) == hero &&
+        api->version >= 5 && api->vr_get_hand(1, &vh) && api->vr_to_world(&vh, hp, hr))
+        place_weapon(cur, hp, hr);   /* VR: the weapon follows the controller */
 }
 
 /* 80035d90(mode) opens the game's own views (1 = scope, 2 = turret) and starts the scope level, facing
@@ -685,13 +656,6 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_bool("face_view", "Hero faces where you look (shots go to the crosshair)", &face_view);
     api->setting_bool("hide_body", "Hide the hero's body", &hide_body);
     api->setting_bool("clean_scope", "Scope view (R2) without scan lines, tint and hum", &clean_scope);
-    api->setting_bool("give_weapons", "Give all weapons and ammo (cheat, once)", &give_weapons);
-    api->setting_bool("viewmodel2", "Weapon view model (machine gun only)", &viewmodel);
-    api->setting_float("vm_right", "Weapon: right / left", &vm_right, -200.0f, 200.0f);
-    api->setting_float("vm_down", "Weapon: down / up", &vm_down, -200.0f, 200.0f);
-    api->setting_float("vm_fwd", "Weapon: forward / back", &vm_fwd, 0.0f, 400.0f);
-    api->setting_float("vm_yaw", "Weapon: turn (degrees)", &vm_yaw, -180.0f, 180.0f);
-    api->setting_float("vm_pitch", "Weapon: tilt (degrees)", &vm_pitch, -90.0f, 90.0f);
     api->hook(0x8005f380, sfx_hook);
     api->hook(0x80035d90, scope_open_hook);
     api->hook(0x80053da0, controls_hook);

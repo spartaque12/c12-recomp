@@ -60,8 +60,8 @@ C = L2, Enter = Start, G = Select. XInput pads work at the same time (analog sti
 * `mods_src\first_person.c`: a first-person view mod. The eye sits at the hero's head while the normal
   controls keep working, with CS-style movement and direct mouse look. The hero faces the view, so shots go to the
   crosshair. Climbing, ladders, ledges, crouching and turrets all work. The mod steps aside in cutscenes and menus.
-  It hides the body and has an optional adjustable weapon view model, an optional clean scope view (R2) without the
-  scan lines, tint and hum, an adjustable field of view, and a give-all-weapons cheat option.
+  It hides the body and has an optional clean scope view (R2) without the scan lines, tint and hum, and an adjustable
+  field of view.
 * HD textures: DuckStation `texupload-*.png` packs in the `hd_textures=` folder.
 
 ## VR (OpenXR headset)
