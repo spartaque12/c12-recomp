@@ -605,6 +605,23 @@ static void move_prep_hook(uint32_t* r, C12OrigFn orig) {
     orig(r);
 }
 
+/* 80053da0(controller) reads the controls into the hero's wanted direction (controller +0x50, also kept
+ * at +0x74): the stick angle plus the game camera's yaw (800f1344). The moves the hero can start on a
+ * button - climbing onto a ledge (Circle, 8001ff20) among them - need it within 45 degrees of his
+ * facing; in the first-person view the game's camera is not where he heads, so Circle crouched instead
+ * of climbing. While he moves on foot it is the direction the mod moves him in. */
+static void controls_hook(uint32_t* r, C12OrigFn orig) {
+    uint32_t ctl = r[4], hero = (uint32_t)r32(0x800efdb8);
+    orig(r);
+    if (was_on && is_ptr(hero) && is_ptr(ctl) && ctl == (uint32_t)r32(hero + 0xb0) && on_foot(hero) && r32(ctl + 0x54) != 0) {
+        int a = (cs_move && cur_move_a >= 0) ? cur_move_a : cur_face_a;
+        if (a >= 0) {
+            if ((r32(ctl + 0x50) & 0xfff) == (r32(ctl + 0x74) & 0xfff)) w32(ctl + 0x74, a);
+            w32(ctl + 0x50, a);
+        }
+    }
+}
+
 /* 80022154(obj, ...) starts and stops running. Starting from a standstill it compares the direction
  * it read from the controls (800eff04, relative to its own camera) with the hero's facing and, if they
  * are more than 22.5 degrees apart, turns him on the spot first. The mod keeps the facing at the
@@ -677,6 +694,7 @@ __declspec(dllexport) int c12_mod_init(const C12ModApi* a) {
     api->setting_float("vm_pitch", "Weapon: tilt (degrees)", &vm_pitch, -90.0f, 90.0f);
     api->hook(0x8005f380, sfx_hook);
     api->hook(0x80035d90, scope_open_hook);
+    api->hook(0x80053da0, controls_hook);
     if (api->version >= 3) api->on_state_loaded(state_loaded);
     return api->hook(0x80018320, camera_hook) && api->hook(0x80065494, draw_hook) && api->hook(0x80073394, weapon_hook) && api->hook(0x8001dea0, steer_hook) && api->hook(0x8002c048, physics_hook) && api->hook(0x8003836c, render_hook) && api->hook(0x8002bb90, move_prep_hook) && api->hook(0x80022154, run_hook) && api->hook(0x8006540c, visibility_hook);
 }
