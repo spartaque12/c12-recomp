@@ -284,6 +284,13 @@ static bool g_list_3d;     // the display list being drawn is the world (large o
 // than the slot: a flat shadow lying on a native floor must not sink into it.
 extern float g_prim_depth;
 static float slot_depth() {
+    // A menu open in play (inventory, giving an item, save point: 800f1338 = 1, the inventory also sets
+    // 800efdfc bit 0x80) shows its item icons as 3D models drawn among the world's primitives, at sort
+    // depths behind the walls: no depth test then, as on the console.
+    u32 menu, inv;
+    memcpy(&menu, g_ram + 0xf1338, 4);
+    memcpy(&inv, g_ram + 0xefdfc, 4);
+    if (menu == 1 || (inv & 0x80)) return 0.0f;
     int game_slot = g_ot_slots_cur - 1 - g_ot_index;
     return (g_list_3d && g_ot_slots_cur >= 1024 && game_slot >= 8) ? (float)(game_slot * 8) * 0.97f : 0.0f;
 }
