@@ -175,8 +175,14 @@ static void rtp(Ctx* c, int v, int sh, int lm, bool last) {
     D[12] = D[13];
     D[13] = D[14];
     D[14] = (s32)(((u32)isy << 16) | ((u32)isx & 0xFFFF));
-    if (g_prec_on) prec_put((u32)D[14], (float)(((s64)C[24] + ir1 * q) / 65536.0), (float)(((s64)C[25] + IR2 * q) / 65536.0),
-                            (float)((1.0 - g_ws_scale) * (256.0 - C[24] / 65536.0)));
+    if (g_prec_on) {   // from the unrounded view-space point (the icons are tiny in their view's units)
+        double k = sh ? 1.0 / 4096.0 : 1.0, vx = m[0] * k, vy = m[1] * k, vz = m[2] * k;
+        if (vz > 0.5) {
+            double pq = (double)h / vz;
+            prec_put((u32)D[14], (float)(C[24] / 65536.0 + vx * g_ws_scale * pq), (float)(C[25] / 65536.0 + vy * pq),
+                     (float)((1.0 - g_ws_scale) * (256.0 - C[24] / 65536.0)));
+        }
+    }
     g_gte_h = (float)h;
     if (last) {
         s64 d = chkF(c, (s64)C[28] + (s64)C[27] * q);
