@@ -61,6 +61,7 @@ enum { GK_NORMAL, GK_SKY };
 struct Group { uint64_t key; float M[12]; u32 first, count; int kind; float bias; float sxy; };   // sxy: sky only, camera x/y scale   // M: R row-major 3x3, then t
 struct Capture {
     bool valid = false, drawn = false;
+    int vk = 0;                      // the view: 0 the main (world) view, 1 another (the menus' item icons)
     float basis[4] = {0, 0, 0, 1};   // VR: head orientation the game camera was built from (x, y, z, w)
     u32 seq = 0;
     u32 ot_lo = 0, ot_hi = 0;    // address range of its ordering table
@@ -68,14 +69,14 @@ struct Capture {
     std::vector<LvTri> tris;
     std::vector<Group> groups;
 };
-static Capture g_cap[2];
+static Capture g_cap[4];          // [0..1] the main view's (double-buffered), [2..3] another view's
 static float g_vr_basis[4] = {0, 0, 0, 1};
 void level3d_vr_basis(const float q[4]) { memcpy(g_vr_basis, q, sizeof g_vr_basis); }
-static int g_cap_cur;
+static int g_cap_cur[2];
 static u32 g_cap_seq;
-static Camera g_last_cam;        // camera of the last main (non-interpolated) emission
-static bool g_last_ok;
-static std::vector<Group> g_last_groups;   // transforms of the last main emission (in-between frames)
+static Camera g_last_cam[2];     // per view kind: camera of the last main (non-interpolated) emission
+static bool g_last_ok[2];
+static std::vector<Group> g_last_groups[2];   // transforms of the last main emission (in-between frames)
 
 static void view_of(const Camera& c, const float p[3], float o[3]) {
     float d[3] = {p[0] - c.eye[0], p[1] - c.eye[1], p[2] - c.eye[2]};
@@ -88,17 +89,20 @@ static void xform(const float M[12], const float p[3], float o[3]) {
 bool settings_is_classic();
 bool scene3d_enabled() { return g_level3d && n3_available() && !settings_is_classic(); }
 
-// The capture that native geometry of the main view's current ordering table goes to. A new one starts
-// when the game builds into another table (they alternate) or the current one has been drawn.
-static Capture* scene_cap() {
-    u32 view = rd32(0x800efde0);
+// The capture that native geometry of a view's current ordering table goes to (default: the main view).
+// A new one starts when the game builds into another table (they alternate) or the current one has
+// been drawn. The menus' item icons have a view (and ordering table) of their own.
+static Capture* scene_cap(u32 view = 0) {
+    u32 mainv = rd32(0x800efde0);
+    if (!view) view = mainv;
     if (!ptr_ok(view)) return nullptr;
+    int vk = view == mainv ? 0 : 1;
     u32 ot = rd32(view + 0x7c) & 0x1FFFFF;
-    Capture& c = g_cap[g_cap_cur];
+    Capture& c = g_cap[vk * 2 + g_cap_cur[vk]];
     if (c.valid && !c.drawn && c.ot_lo == ot) return &c;
-    g_cap_cur ^= 1;
-    Capture& n = g_cap[g_cap_cur];
-    n.valid = true; n.drawn = false; n.seq = ++g_cap_seq;
+    g_cap_cur[vk] ^= 1;
+    Capture& n = g_cap[vk * 2 + g_cap_cur[vk]];
+    n.valid = true; n.drawn = false; n.seq = ++g_cap_seq; n.vk = vk;
     n.tris.clear(); n.groups.clear();
     n.ot_lo = ot;
     n.ot_hi = ot + rd16(view + 0x6c) * 4u;
@@ -282,15 +286,17 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
         if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && (!cap || c.seq > cap->seq)) cap = &c;
     if (!cap || !n3_available()) return;
     Camera cam = cap->cam;
-    bool mix = interp && blend && g_last_ok;
+    int vk = cap->vk;
+    bool mix = interp && blend && g_last_ok[vk];
     if (mix) {
-        float d = fabsf(cam.eye[0] - g_last_cam.eye[0]) + fabsf(cam.eye[1] - g_last_cam.eye[1]) + fabsf(cam.eye[2] - g_last_cam.eye[2]);
-        if (d < 2000.0f) lerp_cam(g_last_cam, cap->cam, 0.5f, cam);   // further = a camera cut: no blend
+        float d = fabsf(cam.eye[0] - g_last_cam[vk].eye[0]) + fabsf(cam.eye[1] - g_last_cam[vk].eye[1]) + fabsf(cam.eye[2] - g_last_cam[vk].eye[2]);
+        if (d < 2000.0f) lerp_cam(g_last_cam[vk], cap->cam, 0.5f, cam);   // further = a camera cut: no blend
         else mix = false;
     }
     N3View v = {};
     v.h = cam.h / g_fov_mult;     // mods widen the field of view the same way as the GTE does
     v.ofx = cam.ofx;
+    if (vk) v.ofx += (1.0f - g_ws_scale) * (256.0f - cam.ofx);   // in their squeezed panels (widescreen HUD layout)
     v.ofy = cam.ofy;
     v.off_x = off_x;
     v.off_y = off_y;
@@ -309,9 +315,9 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
         memcpy(M, g.M, sizeof g.M);
         if (mix && g.key) {
             const Group* p = nullptr;
-            size_t n = g_last_groups.size();
+            size_t n = g_last_groups[vk].size();
             for (size_t k = 0; k < n && !p; k++) {
-                const Group& q = g_last_groups[(li + k) % n];
+                const Group& q = g_last_groups[vk][(li + k) % n];
                 if (q.key == g.key) { p = &q; li = (li + k + 1) % n; }
             }
             if (p && fabsf(p->M[9] - M[9]) + fabsf(p->M[10] - M[10]) + fabsf(p->M[11] - M[11]) < 1500.0f)
@@ -346,7 +352,7 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
         }
     }
     n3_end();
-    if (!interp) { g_last_cam = cap->cam; g_last_ok = true; g_last_groups = cap->groups; cap->drawn = true; }
+    if (!interp) { g_last_cam[vk] = cap->cam; g_last_ok[vk] = true; g_last_groups[vk] = cap->groups; cap->drawn = true; }
 }
 
 // a save state was loaded: captures from before belong to another game
@@ -463,8 +469,8 @@ void level3d_vr_emit(float t, const VrEyeXf& xf, int cx1, int cy1, int cx2, int 
 
 void level3d_reset() {
     for (auto& c : g_cap) c.valid = false;
-    g_last_ok = false;
-    g_last_groups.clear();
+    g_last_ok[0] = g_last_ok[1] = false;
+    g_last_groups[0].clear(); g_last_groups[1].clear();
     g_vsnap[0].valid = g_vsnap[1].valid = false;
 }
 
@@ -699,7 +705,7 @@ bool ptmodel_capture(Ctx* c) {
 static int ptmodel_do(Ctx* c) {
     if (!scene3d_enabled() || !(g_n3_parts & 4)) { g_pm_why = 1; return 0; }
     u32 model = c->r[4], inst = c->r[5], view = c->r[6];
-    if (!ptr_ok(model) || !ptr_ok(inst) || view != rd32(0x800efde0)) { g_pm_why = 2; return 0; }
+    if (!ptr_ok(model) || !ptr_ok(inst) || !ptr_ok(view)) { g_pm_why = 2; return 0; }
     if (rd16(inst + 0x34) != 0) { g_pm_why = 3; return 0; }                       // private sub-ordering-table
     u32 src = rd32(model + 0x28), pstate = rd32(model + 0x20), coords = rd32(model + 0x24);
     if (!ptr_ok(src) || !ptr_ok(pstate) || !ptr_ok(coords) || rd32(src) != 0x33305453) { g_pm_why = 4; return 0; }   // 'ST03'
@@ -721,13 +727,13 @@ static int ptmodel_do(Ctx* c) {
     u32 f88 = mem_r32_slow(c, 0x1f800088), f8c = mem_r32_slow(c, 0x1f80008c);
     lt.flat[0] = s16f(f88, 0) / 4096.0f; lt.flat[1] = s16f(f88, 1) / 4096.0f; lt.flat[2] = s16f(f8c, 0) / 4096.0f;
 
-    Capture* cp = scene_cap();
+    Capture* cp = scene_cap(view);
     if (!cp) { g_pm_why = 6; return 0; }
     Capture& cap = *cp;
     const Camera& cam = cap.cam;
     size_t tri0 = cap.tris.size(), grp0 = cap.groups.size();
     auto give_up = [&]() { cap.tris.resize(tri0); cap.groups.resize(grp0); return 0; };
-    float zlim = (float)rd16(view + 0x6c) * 8.0f;   // the game keeps slots 2..len-1 (z >> 3)
+    float zlim = (float)(rd16(view + 0x6c) << (rd16(view + 0x70) & 7));   // the game keeps slots 2..len-1 (z >> shift)
 
     struct Slot { float p[3]; int g; };
     static Slot slot[256];       // the drivers' vertex scratch: position in the space of the part that loaded it
