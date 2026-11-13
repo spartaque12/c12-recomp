@@ -33,10 +33,13 @@ void gpu_vr_replay(int pass, const VrEyeXf* xf);
 
 // level3d.cpp
 struct VrCamInfo { float h, ofx, ofy, sx, sy; float basis[4]; float R[9], eye[3]; };   // R: world -> view (stretched)   // game projection, stretch, head basis used
-bool level3d_vr_snapshot(u32 slot_addr);                 // the world list for this ordering table arrived
+bool level3d_vr_snapshot(u32 slot_addr);
+bool level3d_vr_main(u32 slot_addr);                 // the world list for this ordering table arrived
 bool level3d_vr_cam(VrCamInfo& out);                    // camera of the newest snapshot
 void level3d_vr_emit(float t, const VrEyeXf& xf, int clip_x1, int clip_y1, int clip_x2, int clip_y2);
 void level3d_vr_basis(const float q[4]);
+bool level3d_desktop_emit(u32 slot_addr, int off_x, int off_y, int clip_x1, int clip_y1, int clip_x2, int clip_y2);
+bool gpu_desktop_ready(const struct GpuDisplay& d);   // the shown picture can be drawn again (pictures at the monitor's rate)
 // extra triangles in the eye's own space (the controller beam), drawn with the scene of the eye being drawn
 struct N3Vtx; struct N3Mat;
 void level3d_vr_extra(const N3Vtx* v, int ntri, const N3Mat* m);                // head orientation the game camera was built from (this frame)

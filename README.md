@@ -95,6 +95,10 @@ runtime (SteamVR, Oculus/Meta, WMR, Virtual Desktop...). Switch it on in the set
   game frame: 50 pictures per second at correct speed, +1 refresh (~20 ms) of display delay. The native 3D scene is
   re-projected with the camera and every object part halfway between two game frames; what still goes through the
   PS1 path (sprites, particles, lines) is shown at its game-frame position.
+* `smooth_present=1` (default, needs `interp=1`): the window gets a picture on every monitor refresh (60, 144,
+  240 Hz...) instead of 50 a second shown for an uneven number of refreshes. Between game frames the last frame's
+  display lists are drawn again with the native scene blended to that moment (the same machinery as the VR eyes);
+  films and screens without a 3D scene are shown as before. Toggle in the menu's Display tab.
 * Widescreen visibility: the game's view-frustum corner rays (80065db8) are widened so geometry at the screen edges
   is not culled.
 * Widescreen: HUD and menu elements are re-proportioned and anchored automatically (`hud_fix`); 2D effects drawn

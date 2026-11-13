@@ -43,7 +43,7 @@ struct XTarget {
     ID3D11Texture2D* dt; ID3D11DepthStencilView* dsv;
     int w, h; float mx, my, sx, sy;
 };
-static XTarget xt[5];
+static XTarget xt[6];   // 2..7; 7 = the whole picture for the monitor (pictures at its rate)
 static ID3D11ShaderResourceView *vram_srv, *copy_srv, *upload_srv;
 static ID3D11VertexShader *vs_prim, *vs_full;
 static ID3D11PixelShader *ps_prim, *ps_upload, *ps_present, *ps_blit;
@@ -67,7 +67,7 @@ static int cur_kind = -1;
 static ID3D11Texture2D* dtex[2];
 static ID3D11DepthStencilView* dsv[2];
 static ID3D11DepthStencilState* ds_state[3];
-static int depth_frame[7] = {-1000, -1000, -1000, -1000, -1000, -1000, -1000};   // g_frame at the last n3_begin on that target
+static int depth_frame[8] = {-1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000};   // g_frame at the last n3_begin on that target
 int g_n3_depth_ps1 = 1;
 float g_prim_depth;   // > 0: view depth of a flat (2D) primitive of the world list, from its sort slot
 int g_n3_selftest = 0;
@@ -750,6 +750,7 @@ static void make_backbuffer() {
     bb->Release();
 }
 
+static ID3D11ShaderResourceView* g_present_src;   // set: present this picture instead of the VRAM display area
 static void hw_present(const GpuDisplay& d) {
     flush();
     cur_kind = -1;
@@ -778,10 +779,17 @@ static void hw_present(const GpuDisplay& d) {
         ctx->VSSetShader(vs_full, nullptr, 0);
         ctx->PSSetShader(ps_present, nullptr, 0);
         ID3D11ShaderResourceView* nul = nullptr;
-        ctx->PSSetShaderResources(0, 1, (d.interp && i_srv) ? &i_srv : &vram_srv);
-        ctx->PSSetSamplers(0, 1, g_cfg.present_linear ? &smp_linear : &smp_point);
-        ctx->PSSetConstantBuffers(0, 1, &cbuf);
-        set_cb(0, d.x / 1024.0f, d.y / 512.0f, d.w / 1024.0f, d.h / 512.0f);
+        if (g_present_src) {   // a whole picture drawn for the monitor (extra target 7)
+            ctx->PSSetShaderResources(0, 1, &g_present_src);
+            ctx->PSSetSamplers(0, 1, g_cfg.present_linear ? &smp_linear : &smp_point);
+            ctx->PSSetConstantBuffers(0, 1, &cbuf);
+            set_cb(0, 0.0f, 0.0f, 1.0f, 1.0f);
+        } else {
+            ctx->PSSetShaderResources(0, 1, (d.interp && i_srv) ? &i_srv : &vram_srv);
+            ctx->PSSetSamplers(0, 1, g_cfg.present_linear ? &smp_linear : &smp_point);
+            ctx->PSSetConstantBuffers(0, 1, &cbuf);
+            set_cb(0, d.x / 1024.0f, d.y / 512.0f, d.w / 1024.0f, d.h / 512.0f);
+        }
         ctx->Draw(3, 0);
         ctx->PSSetShaderResources(0, 1, &nul);
     }
@@ -817,7 +825,7 @@ static void hw_present(const GpuDisplay& d) {
     }
     // while a VR mod paces the frames the headset sets the rhythm: the window must not wait for its vsync
     extern void (*g_vr_pacer)(double until);
-    bool vs = g_cfg.vsync && !g_vr_pacer;
+    bool vs = (g_cfg.vsync && !g_vr_pacer) || g_present_src;   // pictures at the monitor's rate wait for its refresh
     swap->Present(vs ? 1 : 0, (!vs && tearing) ? DXGI_PRESENT_ALLOW_TEARING : 0);
 }
 
@@ -1032,7 +1040,7 @@ bool hw_backend_init() {
 // ---- extra targets for VR (gpu.h) ---------------------------------------------------------------
 // (Re)make extra target `which` (2..5) at w x h with a depth buffer; false if out of video memory.
 bool hw_xtarget_make(int which, int w, int h) {
-    if (!dev || which < 2 || which > 6 || w <= 0 || h <= 0) return false;
+    if (!dev || which < 2 || which > 7 || w <= 0 || h <= 0) return false;
     XTarget& t = xt[which - 2];
     if (t.tex && t.w == w && t.h == h) return true;
     flush();
@@ -1052,7 +1060,7 @@ bool hw_xtarget_make(int which, int w, int h) {
 
 // Show the VRAM display area x, y, w x h on the whole of extra target `which`, and clear it.
 void hw_xtarget_begin(int which, int x, int y, int w, int h, const float rgba[4]) {
-    if (which < 2 || which > 6) return;
+    if (which < 2 || which > 7) return;
     XTarget& t = xt[which - 2];
     if (!t.rtv || w <= 0 || h <= 0) return;
     flush();
@@ -1065,7 +1073,7 @@ void hw_xtarget_begin(int which, int x, int y, int w, int h, const float rgba[4]
 
 // test: write extra target `which` to a BMP
 bool hw_xtarget_save(int which, const char* path) {
-    if (which < 2 || which > 6) return false;
+    if (which < 2 || which > 7) return false;
     XTarget& t = xt[which - 2];
     if (!t.tex) return false;
     flush();
@@ -1096,12 +1104,21 @@ void hw_xtarget_remap(int x, int y, int w, int h) {
     cur_kind = -1;
 }
 
-void* hw_xtarget_texture(int which) { return (which >= 2 && which <= 6) ? (void*)xt[which - 2].tex : nullptr; }
+int hw_scale() { return S; }
+// present extra target `which` (a whole picture) to the window, waiting for the monitor's refresh
+void hw_present_xtarget(int which, const GpuDisplay& d) {
+    if (which < 2 || which > 7 || !xt[which - 2].srv) return;
+    g_present_src = xt[which - 2].srv;
+    hw_present(d);
+    g_present_src = nullptr;
+}
+
+void* hw_xtarget_texture(int which) { return (which >= 2 && which <= 7) ? (void*)xt[which - 2].tex : nullptr; }
 
 // the picture the window shows (the display area of VRAM or of the in-between layer), for a flat
 // "cinema" screen: copied into extra target `which`, stretched over it
 void hw_xtarget_copy_display(int which, const GpuDisplay& d) {
-    if (which < 2 || which > 6) return;
+    if (which < 2 || which > 7) return;
     XTarget& t = xt[which - 2];
     if (!t.rtv) return;
     flush();

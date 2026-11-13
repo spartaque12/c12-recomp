@@ -52,7 +52,9 @@ struct GpuBackend {
 bool hw_xtarget_make(int which, int w, int h);
 void hw_xtarget_begin(int which, int x, int y, int w, int h, const float rgba[4]);
 void hw_xtarget_remap(int x, int y, int w, int h);   // the bound extra target shows another VRAM area
-void* hw_xtarget_texture(int which);                 // ID3D11Texture2D*
+void* hw_xtarget_texture(int which);
+int hw_scale();                                      // internal resolution multiplier
+void hw_present_xtarget(int which, const struct GpuDisplay& d);                 // ID3D11Texture2D*
 void hw_xtarget_copy_display(int which, const struct GpuDisplay& d);
 
 extern GpuBackend g_sw_backend;

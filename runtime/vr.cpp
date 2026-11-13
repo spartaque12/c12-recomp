@@ -265,6 +265,49 @@ void vr_test_shot(const char* dir, int frame) {
     }
 }
 
+// ---- pictures at the monitor's rate (option smooth_present) ------------------------------------------
+// The game makes 25 frames a second (50 pictures with the in-between ones). A monitor refreshing at
+// another rate (60, 144, 239 Hz) shows each of them for an uneven number of refreshes: moving things
+// judder. Instead, while the game waits for its next frame, the window gets a picture on every refresh:
+// the newest frame's display lists drawn again with the native scene blended to that moment (the same
+// machinery as the VR eyes). Films, loading screens and other pictures without a 3D scene are shown as before.
+int g_smooth_present = 1;
+static bool smooth_on() {
+    return g_smooth_present && hw_device() && !g_vr_pacer && g_cfg.interp && !g_cfg.headless && scene3d_enabled();
+}
+// gpu_vblank: true = the pictures come from desktop_pace (skip the normal present)
+bool vr_desktop_owns(const GpuDisplay& d) {
+    if (!smooth_on()) return false;
+    g_vr_active = true;   // keep the display lists and scenes of every frame
+    return gpu_desktop_ready(d);
+}
+// plat_pump: pictures until the game's next frame is due; false = sleep as usual
+bool vr_desktop_pace(double until) {
+    if (!smooth_on()) return false;
+    GpuDisplay d = gpu_display();
+    int ax, ay, aw, ah, ox, oy;
+    if (!gpu_desktop_ready(d) || !gpu_vr_world_area(ax, ay, aw, ah, ox, oy)) return false;
+    int s = hw_scale();
+    if (!hw_xtarget_make(7, aw * s, ah * s)) return false;
+    const float black[4] = {0, 0, 0, 1};
+    for (int guard = 0; guard < 64; guard++) {
+        hw_xtarget_begin(7, ax, ay, aw, ah, black);
+        g_hw_backend.target(7);
+        gpu_vr_replay(3, nullptr);
+        g_hw_backend.target(0);
+        hw_present_xtarget(7, d);   // waits for the monitor's refresh
+        {
+            static int n;
+            static double t0;
+            n++;
+            double now = plat_time();
+            if (now - t0 > 10.0) { if (t0 > 0) logf("smooth present: %.1f pictures a second\n", n / (now - t0)); n = 0; t0 = now; }
+        }
+        if (plat_time() >= until) break;
+    }
+    return true;
+}
+
 void vr_fill_api(C12ModApi& api) {
     api.d3d11_device = api_d3d11_device;
     api.set_pacer = api_set_pacer;

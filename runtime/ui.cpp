@@ -79,6 +79,7 @@ void settings_save(const char* path) {
     fprintf(f, "scale=%d            # internal resolution multiplier\n", c.scale);
     fprintf(f, "widescreen=%d       # 16:9 field of view\n", c.widescreen);
     fprintf(f, "hud_fix=%d          # keep HUD/menus in proportion in widescreen\n", g_hud_fix);
+    { extern int g_smooth_present; fprintf(f, "smooth_present=%d   # a picture per monitor refresh, blended\n", g_smooth_present); }
     { extern int g_level3d; fprintf(f, "level3d=%d          # native 3D renderer for the level (depth buffer)\n", g_level3d); }
     fprintf(f, "filter=%d           # bilinear filtering of original textures\n", c.filter);
     fprintf(f, "hd_enabled=%d       # use the HD texture pack\n", c.hd_enabled);
@@ -185,6 +186,8 @@ static void draw_menu() {
             b = g_hud_fix; if (ImGui::Checkbox("Keep HUD and menus in proportion", &b)) g_hud_fix = b;
             { extern int g_level3d; b = g_level3d; if (ImGui::Checkbox("Native 3D renderer (real depth buffer, no wobble)", &b)) g_level3d = b; }
             ImGui::SameLine(); ImGui::TextDisabled("(level, characters, objects, effects; remastered only)");
+            { extern int g_smooth_present; b = g_smooth_present; if (ImGui::Checkbox("Smooth motion at the monitor's refresh rate", &b)) g_smooth_present = b; }
+            ImGui::SameLine(); ImGui::TextDisabled("(a picture per refresh, blended; needs frame interpolation)");
             b = g_cfg.hd_enabled; if (ImGui::Checkbox("HD texture pack", &b)) g_cfg.hd_enabled = b;
             if (!g_hd_on) { ImGui::SameLine(); ImGui::TextDisabled("(no pack found in '%s')", g_cfg.hd_textures.c_str()); }
             b = g_cfg.filter; if (ImGui::Checkbox("Bilinear filtering of original textures", &b)) g_cfg.filter = b;

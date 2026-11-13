@@ -313,6 +313,7 @@ const VrEyeXf* g_vr_xf;
 bool g_vr_active;
 static bool g_vr_list_world;   // the list being replayed is the world list
 static bool vr_skip() {
+    if (g_vr_pass == 3) return false;
     bool front = g_vr_list_world && g_ot_index >= 0 && g_ot_slots_cur - 1 - g_ot_index < 8;
     if (g_vr_pass == 1) return !g_vr_list_world || front;   // eyes: the world list, without its 2D panels
     return g_vr_list_world && !front;                        // HUD: HUD lists and the world list's 2D panels
@@ -748,15 +749,23 @@ struct FrontState {
 
 // ---- VR: the display lists of the last frame, kept to be drawn again per eye and for the HUD --------
 // A list is stored flat: per node its table slot (or -1), its RAM address and its words.
-struct RecList { FrontState fs; int slots; bool world; std::vector<u32> w; };
+// seq: order of arrival; native: it has a native scene (snapshot taken); tf / tf_on / sub_window: its
+// widescreen 2D layout, applied again when the whole picture is redrawn (pictures at the monitor's rate)
+struct RecList { FrontState fs; int slots; bool world; bool native; u32 seq; std::vector<u32> w; std::vector<Tf> tf; bool tf_on, sub_window; };
+static u32 g_rec_seq;
+static double g_rec_world_time;
 static RecList g_rec_world;                       // the newest world list
 static std::vector<RecList> g_rec_hud[2];         // [0] being collected, [1] the last frame's (complete)
 static bool g_rec_have_world;
 static void vr_record(u32 madr, int slots, const FrontState& fs) {
-    bool world = false;
+    bool world = false, native = false;
     RecList L;
     L.fs = fs;
     L.slots = slots;
+    L.seq = ++g_rec_seq;
+    L.tf_on = g_tf_on;
+    L.sub_window = g_sub_window;
+    if (g_tf_on) L.tf = g_tf;
     u32 a = madr & 0x1FFFFC, ot_top = a, ot_last = a;
     int guard = 0;
     for (;;) {
@@ -766,7 +775,11 @@ static void vr_record(u32 madr, int slots, const FrontState& fs) {
         int idx = -1;
         if (n == 0 && a <= ot_top && ot_top - a < 0x10000 && (a == ot_top || a + 4 == ot_last || a == ot_last)) {
             ot_last = a; idx = (int)((ot_top - a) >> 2);
-            if (idx == 1 && slots >= 1024 && level3d_listed(a)) world = true;
+            if (idx == 1 && slots >= 1024 && level3d_listed(a)) {
+                native = true;
+                level3d_vr_snapshot(a);
+                if (level3d_vr_main(a)) world = true;
+            }
         }
         if (idx >= 0 || n) {
             L.w.push_back((u32)idx); L.w.push_back(a | 0x80000000u); L.w.push_back(n);
@@ -777,17 +790,27 @@ static void vr_record(u32 madr, int slots, const FrontState& fs) {
         if (++guard > 0x40000) break;
     }
     L.world = world;
+    L.native = native;
     if (world) {
         // a new frame: the HUD collected since the last one is complete
         g_rec_hud[1].swap(g_rec_hud[0]);
         g_rec_hud[0].clear();
-        for (size_t i = 0; i + 2 < L.w.size(); i += 3 + L.w[i + 2])
-            if ((int)L.w[i] == 1) { level3d_vr_snapshot(L.w[i + 1]); break; }
         g_rec_world = std::move(L);
         g_rec_have_world = true;
+        extern double plat_time();
+        g_rec_world_time = plat_time();
     } else g_rec_hud[0].push_back(std::move(L));
 }
 bool gpu_vr_have_world() { return g_rec_have_world; }
+// the picture shown now is the newest recorded world frame (a 3D scene, not a film or a menu screen)
+bool gpu_desktop_ready(const GpuDisplay& d) {
+    extern double plat_time();
+    if (!g_rec_have_world || plat_time() - g_rec_world_time > 0.15) return false;
+    const GpuState& ws = g_rec_world.fs.st;
+    // the game draws the next frame into the hidden buffer (other y) while this one is shown: the newest
+    // world frame belongs to the shown picture when it lies in the same columns
+    return d.x <= ws.cx1 && ws.cx1 < d.x + d.w && ws.cy2 - ws.cy1 < d.h + 16;
+}
 bool gpu_vr_world_area(int& x, int& y, int& w, int& h, int& off_x, int& off_y) {
     if (!g_rec_have_world) return false;
     const GpuState& st = g_rec_world.fs.st;
@@ -796,6 +819,12 @@ bool gpu_vr_world_area(int& x, int& y, int& w, int& h, int& off_x, int& off_y) {
     return w > 16 && h > 16;
 }
 static void vr_replay_list(const RecList& L) {
+    if (g_vr_pass == 3) {   // the list's own widescreen layout
+        g_tf_on = L.tf_on;
+        g_sub_window = L.sub_window;
+        if (L.tf_on) g_tf = L.tf;
+        g_tf_i = 0;
+    }
     g_stat = L.fs.stat; g_st = L.fs.st; g_off_x = L.fs.offx; g_off_y = L.fs.offy;
     g_e1 = L.fs.e[0]; g_e2 = L.fs.e[1]; g_e3 = L.fs.e[2]; g_e4 = L.fs.e[3]; g_e5 = L.fs.e[4]; g_e6 = L.fs.e[5];
     g_fifo_n = 0; g_fifo_need = 0; g_poly_line = false; g_xfer_mode = 0;
@@ -810,6 +839,8 @@ static void vr_replay_list(const RecList& L) {
             g_ot_index = idx;
             if (idx == 1 && L.world && g_vr_pass == 1 && g_vr_xf)
                 level3d_vr_emit(-1.0f, *g_vr_xf, L.fs.st.cx1, L.fs.st.cy1, L.fs.st.cx2, L.fs.st.cy2);
+            if (idx == 1 && L.native && g_vr_pass == 3)   // the whole picture again: its scene blended to now
+                level3d_desktop_emit(L.w[i + 1], L.fs.offx, L.fs.offy, L.fs.st.cx1, L.fs.st.cy1, L.fs.st.cx2, L.fs.st.cy2);
         }
         for (u32 k = 0; k < n; k++) gpu_write_gp0(L.w[i + 3 + k]);
         i += 3 + n;
@@ -826,8 +857,19 @@ void gpu_vr_replay(int pass, const VrEyeXf* xf) {
     g_tf_on = false;
     g_vr_pass = pass;
     g_vr_xf = xf;
+    std::vector<Tf> keep_tf_v;
+    bool keep_sub = g_sub_window;
+    if (pass == 3) keep_tf_v = g_tf;
     if (pass == 1) vr_replay_list(g_rec_world);
-    else {
+    else if (pass == 3) {
+        // the shown picture: the world list, then the lists that drew into the same frame buffer after it
+        const GpuState& ws = g_rec_world.fs.st;
+        int aw = ws.cx2 - ws.cx1 + 1, ah = ws.cy2 - ws.cy1 + 1;
+        auto buf = [&](const RecList& L) { return std::make_pair(aw > 0 ? L.fs.offx / aw : 0, ah > 0 ? L.fs.offy / ah : 0); };
+        vr_replay_list(g_rec_world);
+        for (const RecList& L : g_rec_hud[0])
+            if (L.seq > g_rec_world.seq && buf(L) == buf(g_rec_world)) vr_replay_list(L);
+    } else {
         // HUD lists may draw into the other frame buffer of the double buffer: the target is moved onto
         // the buffer each list draws into (same size as the world's)
         const GpuState& ws = g_rec_world.fs.st;
@@ -840,6 +882,7 @@ void gpu_vr_replay(int pass, const VrEyeXf* xf) {
         buffer_of(g_rec_world);
         vr_replay_list(g_rec_world);
     }
+    if (pass == 3) { g_tf = keep_tf_v; g_sub_window = keep_sub; g_tf_i = 0; }
     g_vr_pass = 0;
     g_vr_xf = nullptr;
     g_noside = false;
@@ -1016,7 +1059,8 @@ void gpu_vblank() {
         }
         return;
     }
-    g_be->present(d);
+    extern bool vr_desktop_owns(const GpuDisplay& d);
+    if (!vr_desktop_owns(d)) g_be->present(d);   // else the pictures come at the monitor's rate (vr.cpp)
     if (g_cfg.max_frames && g_frame >= g_cfg.max_frames) { logf("reached frame %d (audio queue %d ms)\n", g_frame, plat_audio_queued_ms()); exit(0); }
     if (!g_cfg.shot_dir.empty() && g_cfg.shot_every && (g_frame % g_cfg.shot_every) == 0) {
         extern char g_bb_shot[512];

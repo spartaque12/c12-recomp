@@ -419,10 +419,11 @@ void level3d_emit(u32 slot_addr, bool interp, bool blend, int off_x, int off_y, 
 }
 
 // a save state was loaded: captures from before belong to another game
-// ---- VR: the scenes of the last two world frames, drawn again per eye ----------------------------
-static Capture g_vsnap[2];          // [0] the frame before, [1] the newest
-static u32 g_vsnap_seq;
-static double g_vsnap_time, g_vsnap_dt = 0.04;
+// ---- the scenes of the last two frames, drawn again later (VR eyes, pictures at the monitor's rate) --
+// Per view kind (the world, the menus' icons): [0] the frame before, [1] the newest, and when the newest
+// arrived; a picture at time `now` is blended between them by (now - time) / dt.
+struct SnapSet { Capture s[2]; u32 seq = 0; double time = 0, dt = 0.04; };
+static SnapSet g_snap[2];
 double plat_time();
 bool level3d_vr_snapshot(u32 slot_addr) {
     slot_addr &= 0x1FFFFF;
@@ -430,18 +431,25 @@ bool level3d_vr_snapshot(u32 slot_addr) {
     for (auto& c : g_cap)
         if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi && (!cap || c.seq > cap->seq)) cap = &c;
     if (!cap) return false;
-    if (cap->seq == g_vsnap_seq && g_vsnap[1].valid) return true;
-    g_vsnap[0] = std::move(g_vsnap[1]);
-    g_vsnap[1] = *cap;
-    g_vsnap_seq = cap->seq;
+    SnapSet& S = g_snap[cap->vk];
+    if (cap->seq == S.seq && S.s[1].valid) return true;
+    S.s[0] = std::move(S.s[1]);
+    S.s[1] = *cap;
+    S.seq = cap->seq;
     double now = plat_time();
-    double dt = now - g_vsnap_time;
-    if (dt > 0.01 && dt < 0.2) g_vsnap_dt = g_vsnap_dt * 0.8 + dt * 0.2;
-    g_vsnap_time = now;
+    double dt = now - S.time;
+    if (dt > 0.01 && dt < 0.2) S.dt = S.dt * 0.8 + dt * 0.2;
+    S.time = now;
     return true;
 }
+// the ordering table at slot_addr is the main (world) view's
+bool level3d_vr_main(u32 slot_addr) {
+    slot_addr &= 0x1FFFFF;
+    for (auto& c : g_cap) if (c.valid && slot_addr >= c.ot_lo && slot_addr < c.ot_hi) return c.vk == 0;
+    return false;
+}
 bool level3d_vr_cam(VrCamInfo& o) {
-    const Capture& c = g_vsnap[1];
+    const Capture& c = g_snap[0].s[1];
     if (!c.valid) return false;
     o.h = c.cam.h; o.ofx = c.cam.ofx; o.ofy = c.cam.ofy; o.sx = c.cam.sx; o.sy = c.cam.sy;
     memcpy(o.basis, c.basis, sizeof o.basis);
@@ -453,12 +461,13 @@ static const N3Vtx* g_vx_v;
 static const N3Mat* g_vx_m;
 static int g_vx_n;
 void level3d_vr_extra(const N3Vtx* v, int ntri, const N3Mat* m) { g_vx_v = v; g_vx_n = ntri; g_vx_m = m; }
-// t < 0: from the time since the newest frame arrived (0 = the frame before, 1 = the newest)
-void level3d_vr_emit(float t, const VrEyeXf& xf, int cx1, int cy1, int cx2, int cy2) {
-    const Capture& cur = g_vsnap[1];
-    const Capture& prv = g_vsnap[0];
+// t < 0: from the time since the newest frame arrived (0 = the frame before, 1 = the newest).
+// desktop: the game's own view (the sky keeps its own projection distance)
+static void emit_snap(const SnapSet& S, float t, const VrEyeXf& xf, int cx1, int cy1, int cx2, int cy2, bool desktop) {
+    const Capture& cur = S.s[1];
+    const Capture& prv = S.s[0];
     if (!cur.valid || !n3_available()) return;
-    if (t < 0.0f) t = (float)((plat_time() - g_vsnap_time) / g_vsnap_dt);
+    if (t < 0.0f) t = (float)((plat_time() - S.time) / S.dt);
     t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
     Camera cam = cur.cam;
     bool mix = prv.valid && t < 1.0f;
@@ -514,6 +523,7 @@ void level3d_vr_emit(float t, const VrEyeXf& xf, int cx1, int cy1, int cx2, int 
                 else if (kind == GK_SKY) {   // at infinity: the camera's rotation only
                     xform(gm[lv.g].data(), p, w);
                     for (int k = 0; k < 3; k++) q[k] = cam.R[k * 3] * w[0] + cam.R[k * 3 + 1] * w[1] + cam.R[k * 3 + 2] * w[2];
+                    if (desktop) { q[0] *= cur.groups[lv.g].sxy; q[1] *= cur.groups[lv.g].sxy; }
                 } else { xform(gm[lv.g].data(), p, w); view_of(cam, w, q); }
                 q[0] *= isx; q[1] *= isy;   // true camera space
                 float d[3] = {q[0], q[1], q[2]};
@@ -529,12 +539,35 @@ void level3d_vr_emit(float t, const VrEyeXf& xf, int cx1, int cy1, int cx2, int 
     for (int i = 0; i < g_vx_n; i++) n3_tri(g_vx_v + 3 * i, *g_vx_m);
     n3_end();
 }
+void level3d_vr_emit(float t, const VrEyeXf& xf, int cx1, int cy1, int cx2, int cy2) { emit_snap(g_snap[0], t, xf, cx1, cy1, cx2, cy2, false); }
+
+// A picture for the monitor between game frames: the scene of the list at slot_addr (the world, or the
+// menus' icons) seen by the game's own camera, blended to now. Returns false if there is none.
+bool level3d_desktop_emit(u32 slot_addr, int off_x, int off_y, int cx1, int cy1, int cx2, int cy2) {
+    slot_addr &= 0x1FFFFF;
+    for (int vk = 0; vk < 2; vk++) {
+        const SnapSet& S = g_snap[vk];
+        const Capture& c = S.s[1];
+        if (!c.valid || slot_addr < c.ot_lo || slot_addr >= c.ot_hi) continue;
+        // the game's projection in true camera space: sx = OFX + x * S * H / z (widescreen narrows x)
+        VrEyeXf xf = {};
+        xf.R[0] = xf.R[4] = xf.R[8] = 1.0f;
+        float hg = c.cam.h / (g_fov_mult > 0.0f ? g_fov_mult : 1.0f);
+        xf.hx = c.cam.sx * hg * g_ws_scale;
+        xf.hy = c.cam.sy * hg;
+        xf.cx = off_x + c.cam.ofx + (vk ? (1.0f - g_ws_scale) * (256.0f - c.cam.ofx) : 0.0f);
+        xf.cy = off_y + c.cam.ofy;
+        emit_snap(S, -1.0f, xf, cx1, cy1, cx2, cy2, true);
+        return true;
+    }
+    return false;
+}
 
 void level3d_reset() {
     for (auto& c : g_cap) c.valid = false;
     g_last_ok[0] = g_last_ok[1] = false;
     g_last_groups[0].clear(); g_last_groups[1].clear();
-    g_vsnap[0].valid = g_vsnap[1].valid = false;
+    for (auto& S : g_snap) S.s[0].valid = S.s[1].valid = false;
 }
 
 // ---- MeshFX effect meshes (80086810; see re/notes_models.md) ---------------------------------
