@@ -840,7 +840,7 @@ static void vr_replay_list(const RecList& L) {
             if (idx == 1 && L.world && g_vr_pass == 1 && g_vr_xf)
                 level3d_vr_emit(-1.0f, *g_vr_xf, L.fs.st.cx1, L.fs.st.cy1, L.fs.st.cx2, L.fs.st.cy2);
             if (idx == 1 && L.native && g_vr_pass == 3)   // the whole picture again: its scene blended to now
-                level3d_desktop_emit(L.w[i + 1], L.fs.offx, L.fs.offy, L.fs.st.cx1, L.fs.st.cy1, L.fs.st.cx2, L.fs.st.cy2);
+                level3d_desktop_emit(L.w[i + 1], g_off_x, g_off_y, g_st.cx1, g_st.cy1, g_st.cx2, g_st.cy2);
         }
         for (u32 k = 0; k < n; k++) gpu_write_gp0(L.w[i + 3 + k]);
         i += 3 + n;
