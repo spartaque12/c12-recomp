@@ -37,62 +37,6 @@ lock on / strafe (R1), Q or mouse wheel = cycle weapons (L1), E = Square, F = Ci
 C = L2, Enter = Start, G = Select. XInput pads work at the same time (analog sticks + rumble). Saves go to
 `saves\card1.mcd`, a standard raw memory-card image (readable by emulators).
 
-## Layout
-
-| Path | What |
-|---|---|
-| `tools/recomp/` | The recompiler: function discovery, jump tables, MIPS → C |
-| `gen/` | Generated C: main EXE (1704 functions) + 25 overlays (~3900), `*_map.txt` = function lists |
-| `runtime/core.cpp` | Memory map, scheduler, IRQs, dispatch, interpreter fallback |
-| `runtime/bios.cpp`, `memcard.cpp` | High-level BIOS (no BIOS image needed), memory card image (file API + raw sectors) |
-| `runtime/gte.cpp` | GTE with widescreen projection |
-| `runtime/gpu*.cpp`, `hdtex.cpp` | GPU front-end, D3D11 renderer, software reference renderer, HD textures |
-| `runtime/level3d.cpp`, `gpu3d.h` | Native 3D renderer: level, object models, effect meshes as real 3D triangles |
-| `runtime/spu.cpp`, `cdrom.cpp`, `hw.cpp` | Sound, CD-ROM + XA, timers/DMA/pad |
-| `runtime/game_c12.cpp` | Game-specific glue: fibres → native coroutines, frame pacing |
-| `runtime/savestate.cpp`, `costack.cpp`, `ctxswitch.asm` | Save states; coroutine stacks at fixed addresses |
-| `runtime/mods.cpp`, `c12_mod_api.h` | Mod loader and native mod API |
-| `re/main_decomp.c` | Ghidra decompilation of the EXE (reference for modding) |
-
-## Modding
-
-* `mods\disc\<PATH>` replaces a disc file, `mods\disc\<PATH>@<HEX>` patches it at a byte offset
-  (e.g. `mods\disc\PROJFILE.MWD@1A2000`).
-* `mods\*.dll` — native mods. Every original function can be hooked by its PSX address;
-  see `runtime\c12_mod_api.h` and `mods_src\example_mod.c`. A mod can register itself and its settings
-  (on/off switch, sliders) for the **Mods** tab of the settings menu, change the field of view and a few
-  runtime options; settings are stored in `c12.ini` as `mod.<name>.<key>`. One hook per game function.
-  Build all mods with `mods_src\build_mods.ps1`.
-* `mods_src\first_person.c`: a first-person view mod. The eye sits at the hero's head while the normal
-  controls keep working, with CS-style movement and direct mouse look. The hero faces the view, so shots go to the
-  crosshair. Climbing, ladders, ledges, crouching and turrets all work. The mod steps aside in cutscenes and menus.
-  It hides the body and has an optional clean scope view (R2) without the scan lines, tint and hum, and an adjustable
-  field of view.
-* HD textures: DuckStation `texupload-*.png` packs in the `hd_textures=` folder.
-
-## VR (OpenXR headset)
-
-`mods\vr.dll` (source `mods_src\vr`, build `mods_src\vr\build_vr.ps1`) plays the game in a headset through any OpenXR
-runtime (SteamVR, Oculus/Meta, WMR, Virtual Desktop...). Switch it on in the settings menu, Mods tab ("VR"); F8 recentres.
-`openxr_loader.dll` must be next to it in `mods\`.
-
-* Real stereo: the runtime draws the last world frame once per eye at the headset's rate (72-120 Hz) from each eye's
-  own pose and lens. The native 3D scene (level, characters, objects, effects, sky, shadows) is re-projected per eye
-  and blended between the game's 25 Hz frames, so head motion is always smooth; sprites, glows and lines are moved
-  into each eye at their sort depth.
-* With the first-person mod the camera turns with your head: W/A/S/D and aiming follow where you look, the mouse
-  turns the body. Without it the head looks around the game's own camera.
-* The HUD floats in front of you; menus, loading screens and films are shown on a screen ahead.
-* Settings (Mods tab): world scale, render scale, HUD and screen distance / width.
-* Testing without a headset: `--vr_test 1` with test screenshots writes both eyes and the HUD; `mods_src\vr\README.md`
-  describes the simulated OpenXR runtime (`vr_xr_test_runtime.dll`, captures of what each eye sees).
-* Motion controllers (Touch, Index, Vive, WMR, HP Reverb, simple): left stick move, right stick turn (30 degree
-  snaps or smooth), right trigger fire / accept, left trigger crouch, right grip lock on, left grip next weapon,
-  A use, B back, X scope view, Y Select, menu Start, right stick click look. Shots go where the right controller
-  points (a laser beam shows it, stopped by walls); with the first-person mod the weapon is in your hand. A short
-  rumble on firing. Keyboard / mouse / pad keep working.
-* Comfort: snap or smooth turn, the HUD follows your head lazily (or fixed to the view), all in the Mods tab.
-
 ## Features
 
 **Recompilation**
@@ -156,6 +100,63 @@ runtime (SteamVR, Oculus/Meta, WMR, Virtual Desktop...). Switch it on in the set
 
 **Modding**
 * Native DLL mods with hooks on any game function, a Mods tab with their settings, and disc file replacement.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `tools/recomp/` | The recompiler: function discovery, jump tables, MIPS → C |
+| `gen/` | Generated C: main EXE (1704 functions) + 25 overlays (~3900), `*_map.txt` = function lists |
+| `runtime/core.cpp` | Memory map, scheduler, IRQs, dispatch, interpreter fallback |
+| `runtime/bios.cpp`, `memcard.cpp` | High-level BIOS (no BIOS image needed), memory card image (file API + raw sectors) |
+| `runtime/gte.cpp` | GTE with widescreen projection |
+| `runtime/gpu*.cpp`, `hdtex.cpp` | GPU front-end, D3D11 renderer, software reference renderer, HD textures |
+| `runtime/level3d.cpp`, `gpu3d.h` | Native 3D renderer: level, object models, effect meshes as real 3D triangles |
+| `runtime/spu.cpp`, `cdrom.cpp`, `hw.cpp` | Sound, CD-ROM + XA, timers/DMA/pad |
+| `runtime/game_c12.cpp` | Game-specific glue: fibres → native coroutines, frame pacing |
+| `runtime/savestate.cpp`, `costack.cpp`, `ctxswitch.asm` | Save states; coroutine stacks at fixed addresses |
+| `runtime/mods.cpp`, `c12_mod_api.h` | Mod loader and native mod API |
+| `re/main_decomp.c` | Ghidra decompilation of the EXE (reference for modding) |
+
+## Modding
+
+* `mods\disc\<PATH>` replaces a disc file, `mods\disc\<PATH>@<HEX>` patches it at a byte offset
+  (e.g. `mods\disc\PROJFILE.MWD@1A2000`).
+* `mods\*.dll` — native mods. Every original function can be hooked by its PSX address;
+  see `runtime\c12_mod_api.h` and `mods_src\example_mod.c`. A mod can register itself and its settings
+  (on/off switch, sliders) for the **Mods** tab of the settings menu, change the field of view and a few
+  runtime options; settings are stored in `c12.ini` as `mod.<name>.<key>`. One hook per game function.
+  Build all mods with `mods_src\build_mods.ps1`.
+* `mods_src\first_person.c`: a first-person view mod. The eye sits at the hero's head while the normal
+  controls keep working, with CS-style movement and direct mouse look. The hero faces the view, so shots go to the
+  crosshair. Climbing, ladders, ledges, crouching and turrets all work. The mod steps aside in cutscenes and menus.
+  It hides the body and has an optional clean scope view (R2) without the scan lines, tint and hum, and an adjustable
+  field of view.
+* HD textures: DuckStation `texupload-*.png` packs in the `hd_textures=` folder.
+
+## VR (OpenXR headset)
+
+`mods\vr.dll` (source `mods_src\vr`, build `mods_src\vr\build_vr.ps1`) plays the game in a headset through any OpenXR
+runtime (SteamVR, Oculus/Meta, WMR, Virtual Desktop...). Switch it on in the settings menu, Mods tab ("VR"); F8 recentres.
+`openxr_loader.dll` must be next to it in `mods\`.
+
+* Real stereo: the runtime draws the last world frame once per eye at the headset's rate (72-120 Hz) from each eye's
+  own pose and lens. The native 3D scene (level, characters, objects, effects, sky, shadows) is re-projected per eye
+  and blended between the game's 25 Hz frames, so head motion is always smooth; sprites, glows and lines are moved
+  into each eye at their sort depth.
+* With the first-person mod the camera turns with your head: W/A/S/D and aiming follow where you look, the mouse
+  turns the body. Without it the head looks around the game's own camera.
+* The HUD floats in front of you; menus, loading screens and films are shown on a screen ahead.
+* Settings (Mods tab): world scale, render scale, HUD and screen distance / width.
+* Testing without a headset: `--vr_test 1` with test screenshots writes both eyes and the HUD; `mods_src\vr\README.md`
+  describes the simulated OpenXR runtime (`vr_xr_test_runtime.dll`, captures of what each eye sees).
+* Motion controllers (Touch, Index, Vive, WMR, HP Reverb, simple): left stick move, right stick turn (30 degree
+  snaps or smooth), right trigger fire / accept, left trigger crouch, right grip lock on, left grip next weapon,
+  A use, B back, X scope view, Y Select, menu Start, right stick click look. Shots go where the right controller
+  points (a laser beam shows it, stopped by walls); with the first-person mod the weapon is in your hand. A short
+  rumble on firing. Keyboard / mouse / pad keep working.
+* Comfort: snap or smooth turn, the HUD follows your head lazily (or fixed to the view), all in the Mods tab.
+
 
 ## Notes
 
