@@ -213,6 +213,7 @@ static int api_vr_render(const C12VrView* views, float upm, int w, int h, C12VrI
         int nb = beam_for_eye(views[e], upm);
         level3d_vr_extra(g_beam_tri, nb, &g_beam_mat);
         gpu_vr_replay(1, &xf);
+        gpu_vr_draw_fade(ax, ay, aw, ah);
         level3d_vr_extra(nullptr, 0, nullptr);
         g_hw_backend.target(0);
         out->eye[e] = hw_xtarget_texture(2 + e);

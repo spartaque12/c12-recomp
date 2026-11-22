@@ -973,7 +973,11 @@ namespace
         if (cap < 2)
             return XR_ERROR_SIZE_INSUFFICIENT;
         for (int i = 0; i < 2; ++i)
+        {
             v[i] = {XR_TYPE_VIEW_CONFIGURATION_VIEW, nullptr, 1440, 2880, 1600, 3200, 1, 1};
+            if (std::getenv("XRTEST_PSVR2_FOV")) // the size SteamVR recommends for the PSVR2 (3400 x 3468)
+                v[i] = {XR_TYPE_VIEW_CONFIGURATION_VIEW, nullptr, 3400, 4096, 3468, 4096, 1, 1};
+        }
         return XR_SUCCESS;
     }
     XrResult XRAPI_CALL rtEnumerateEnvironmentBlendModes(XrInstance, XrSystemId, XrViewConfigurationType, uint32_t cap, uint32_t *count,
@@ -1161,6 +1165,11 @@ namespace
             views[i].pose = compose(head, {{0, 0, 0, 1}, {i ? halfIpd() : -halfIpd(), 0.0f, 0.0f}});
             const float r = 50.0f * kPi / 180.0f;
             views[i].fov = {i ? -r * 0.9f : -r, i ? r : r * 0.9f, r, -r};
+            if (std::getenv("XRTEST_PSVR2_FOV")) // the PSVR2 as SteamVR reports it: 61.5 degrees outwards, 43.4 inwards, 53 up and down
+            {
+                const float k = kPi / 180.0f;
+                views[i].fov = {i ? -43.4f * k : -61.5f * k, i ? 61.5f * k : 43.4f * k, 53.0f * k, -53.0f * k};
+            }
         }
         vs->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
                              XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;

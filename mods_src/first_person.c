@@ -102,7 +102,7 @@ static void set_hidden(uint32_t obj, int hidden) {
     if (m) w32(m + 0x0c, hidden ? (r32(m + 0x0c) | 1) : (r32(m + 0x0c) & ~1));
 }
 
-/* small sine: good to ~0.001, avoids pulling in the math library */
+/* small sine: good to ~1e-6 (the VR basis is built from it), avoids pulling in the math library */
 static float fsin(float deg) {
     float x = deg * 0.01745329252f;
     while (x > 3.14159265f) x -= 6.28318531f;
@@ -110,7 +110,7 @@ static float fsin(float deg) {
     if (x > 1.57079633f) x = 3.14159265f - x;
     if (x < -1.57079633f) x = -3.14159265f - x;
     float x2 = x * x;
-    return x * (1.0f - x2 / 6.0f * (1.0f - x2 / 20.0f * (1.0f - x2 / 42.0f)));
+    return x * (1.0f - x2 / 6.0f * (1.0f - x2 / 20.0f * (1.0f - x2 / 42.0f * (1.0f - x2 / 72.0f * (1.0f - x2 / 110.0f)))));
 }
 static float fcos(float deg) { return fsin(deg + 90.0f); }
 static float fsqrt1(float v) {   /* square root without the math library: exponent-halving guess + Newton */
@@ -365,6 +365,14 @@ static void place_weapon(uint32_t gun, const float hp[3], const float hr[9]) {
 
 static int sext12(int v) { v &= 0xfff; return v >= 0x800 ? v - 0x1000 : v; }
 
+/* The orientation the runtime removes again when it draws each eye: yaw(y) * pitch(x), as a quaternion
+ * (x, y, z, w) from the head's yaw (+ = left) and pitch (+ = up) in facing units, 4096 per turn. */
+static void make_basis(float yu, float pu, float basis[4]) {
+    float ya = yu * (360.0f / 4096.0f) * 0.5f, pa = pu * (360.0f / 4096.0f) * 0.5f;   /* half angles in degrees */
+    float sy = fsin(ya), cy = fcos(ya), sp = fsin(pa), cp = fcos(pa);
+    basis[0] = cy * sp; basis[1] = sy * cp; basis[2] = -sy * sp; basis[3] = cy * cp;
+}
+
 /* VR (a headset mod publishes the head pose, API 4): the head turns the view - its yaw is added to the
  * body's (mouse) yaw, the pitch is the head's - so walking and aiming follow where you look. The
  * orientation applied is handed back to the runtime (vr_set_basis), which adds only what is left
@@ -384,10 +392,7 @@ static int vr_head(float* yaw_u, float* pitch_u, float basis[4]) {
     if (pu < -900.0f) pu = -900.0f;
     *yaw_u = -yu;
     *pitch_u = pu;
-    /* basis = yaw(y) * pitch(x), half angles in degrees */
-    float ya = yu * (360.0f / 4096.0f) * 0.5f, pa = pu * (360.0f / 4096.0f) * 0.5f;
-    float sy = fsin(ya), cy = fcos(ya), sp = fsin(pa), cp = fcos(pa);
-    basis[0] = cy * sp; basis[1] = sy * cp; basis[2] = -sy * sp; basis[3] = cy * cp;
+    make_basis(yu, pu, basis);
     return 1;
 }
 
@@ -434,7 +439,17 @@ static void camera_hook(uint32_t* r, C12OrigFn orig) {
         while (look_yaw < 0.0f) look_yaw += 4096.0f;
         w16(cam + 0x20, (int)(vr ? hp : look_pitch) & 0xfff);
         w16(cam + 0x22, (int)(look_yaw + hy) & 0xfff);
-        if (vr) api->vr_set_basis(basis);
+        if (vr) {
+            /* The game keeps its view angles in whole 1/4096 turns: what its matrix is built from is the
+             * rounded angle, not the head's. Hand the runtime that one, so that only the head's own
+             * motion since this frame is added when each eye is drawn (else every frame's rounding error
+             * shows as a small shake of the whole picture). */
+            float d = (float)((int)(look_yaw + hy) & 0xfff) - look_yaw;
+            if (d > 2048.0f) d -= 4096.0f;
+            if (d < -2048.0f) d += 4096.0f;
+            make_basis(-d, (float)sext12((int)hp), basis);
+            api->vr_set_basis(basis);
+        }
         uint32_t v0 = r[2], v1 = r[3];
         r[4] = cam + 0x20;
         r[5] = vo + 0x0c;

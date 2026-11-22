@@ -161,7 +161,11 @@ runtime (SteamVR, Oculus/Meta, WMR, Virtual Desktop...). Switch it on in the set
   view) is off while VR is on; the level is drawn as wide as the headset sees (`vr_frustum`, degrees of margin).
 * Settings (Mods tab): world scale, render scale, HUD and screen distance / width.
 * Testing without a headset: `--vr_test 1` with test screenshots writes both eyes and the HUD; `mods_src\vr\README.md`
-  describes the simulated OpenXR runtime (`vr_xr_test_runtime.dll`, captures of what each eye sees).
+  describes the simulated OpenXR runtime (`vr_xr_test_runtime.dll`, captures of what each eye sees). With
+  `XRTEST_PSVR2_FOV=1` it reports a PSVR2's field of view and render size.
+* Frame timing (for stutter): `vr.log` gets a summary every 10 s - what a headset frame costs on the CPU and GPU, how long the
+  game's own frame takes between headset frames, skipped refreshes. With the environment variable `C12_VR_TIMING_CSV` set,
+  `vr_timing.csv` next to the exe gets a row per headset frame (columns described in `mods_src\vr\vr_mod.cpp`).
 * Motion controllers (Touch, Index, Vive, WMR, HP Reverb, simple): left stick move, right stick turn (30 degree
   snaps or smooth), right trigger fire / accept, left trigger crouch, right grip lock on, left grip next weapon,
   A use, B back, X scope view, Y Select, menu Start, right stick click look. Shots go where the right controller

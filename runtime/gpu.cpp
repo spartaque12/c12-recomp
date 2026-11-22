@@ -313,8 +313,14 @@ int g_vr_pass;
 const VrEyeXf* g_vr_xf;
 bool g_vr_active;
 static bool g_vr_list_world;   // the list being replayed is the world list
+static bool g_vr_icons;        // the HUD layer draws the menus' item icons: their scene only, no flat primitives
+// full-screen fades / flashes found by the HUD pass: [new] being collected, [cur] those of the last pass (drawn over the eyes)
+struct VrFade { u32 rgb; int blend; bool semi; };
+static VrFade g_vr_fade_new[8], g_vr_fade_cur[8];
+static int g_vr_fade_n_new, g_vr_fade_n_cur;
 static bool vr_skip() {
     if (g_vr_pass == 3) return false;
+    if (g_vr_icons) return true;
     bool front = g_vr_list_world && g_ot_index >= 0 && g_ot_slots_cur - 1 - g_ot_index < 8;
     if (g_vr_pass == 1) return !g_vr_list_world || front;   // eyes: the world list, without its 2D panels
     return g_vr_list_world && !front;                        // HUD: HUD lists and the world list's 2D panels
@@ -350,6 +356,13 @@ static bool vr_move_vtx(GpuVtx* v, int n) {
 static float prim_depth() { return g_vr_pass == 1 ? g_vr_zeye : slot_depth(); }
 
 bool scene3d_enabled();
+// The console silently drops triangles larger than 1023x511. Games rely on that (this one sends
+// over-sized helper polygons with its scope effect).
+static bool oversize_tri(const GpuVtx* t) {
+    int x0 = std::min({t[0].x, t[1].x, t[2].x}), x1 = std::max({t[0].x, t[1].x, t[2].x});
+    int y0 = std::min({t[0].y, t[1].y, t[2].y}), y1 = std::max({t[0].y, t[1].y, t[2].y});
+    return x1 - x0 > 1023 || y1 - y0 > 511;
+}
 static void draw_polygon() {
     u32 cmd = g_fifo[0] >> 24;
     bool gouraud = cmd & 0x10, quad = cmd & 0x08, tex = cmd & 0x04;
@@ -378,6 +391,11 @@ static void draw_polygon() {
     g_st.semi = cmd & 2;
     g_st.gouraud = gouraud;
     g_st.dither = (g_stat & 0x200) && (gouraud || (tex && !g_st.raw));
+    // The console drops a triangle over 1023 x 511 (see below). That is judged on the game's own screen
+    // coordinates: once an eye has moved the corners (and shrunk them) the dropped helper polygons - some
+    // span the whole +-1024 range - would be drawn, as bands across the whole view.
+    const bool vr_drop0 = g_vr_pass == 1 && oversize_tri(v), vr_drop1 = g_vr_pass == 1 && quad && oversize_tri(v + 1);
+    if (vr_drop0 && (!quad || vr_drop1)) return;
     if (g_vr_pass && (vr_skip() || (g_vr_pass == 1 && !vr_move_vtx(v, n)))) return;
     // a polygon of the world scene (the front-most slots of the world list may hold a 2D panel)
     bool scene = g_list_3d && g_ot_index < g_ot_slots_cur - 8;
@@ -396,19 +414,12 @@ static void draw_polygon() {
         for (int k = 0; k < n; k++) fprintf(g_dbg_file, " (%d,%d|uv %d,%d|%06x)", v[k].x, v[k].y, v[k].u, v[k].v, v[k].rgb);
         fputc(10, g_dbg_file);
     }
-    // The console silently drops triangles larger than 1023x511. Games rely on that (this one sends
-    // over-sized helper polygons with its scope effect).
-    auto oversize = [](const GpuVtx* t) {
-        int x0 = std::min({t[0].x, t[1].x, t[2].x}), x1 = std::max({t[0].x, t[1].x, t[2].x});
-        int y0 = std::min({t[0].y, t[1].y, t[2].y}), y1 = std::max({t[0].y, t[1].y, t[2].y});
-        return x1 - x0 > 1023 || y1 - y0 > 511;
-    };
     // A primitive of the world list has no depth of its own. On the console the sort order hid it
     // behind nearer geometry; with native geometry drawn first it would show through walls and
     // characters: test it at its slot's depth.
     g_prim_depth = prim_depth();
-    if (!oversize(v)) g_be->tri(v, g_st);
-    if (quad && !oversize(v + 1)) g_be->tri(v + 1, g_st);
+    if (!vr_drop0 && !oversize_tri(v)) g_be->tri(v, g_st);
+    if (quad && !vr_drop1 && !oversize_tri(v + 1)) g_be->tri(v + 1, g_st);
     g_prim_depth = 0.0f;
 }
 
@@ -432,13 +443,20 @@ static void draw_rect() {
     g_st.gouraud = false;
     g_st.dither = false;
     if (prim_2d(x, y, x + w, y + h)) return;
+    bool vr_quad = false;   // an eye's sprite: drawn as a quad with the corners where they fall, not rounded to PS1 pixels
+    float qx[4] = {}, qy[4] = {};
+    const int src_w = w, src_h = h;   // the sprite's size in its texture
     if (g_vr_pass) {
         if (vr_skip()) return;
         if (g_vr_pass == 1) {   // a sprite: its corners into the eye's view, at its sort depth
-            float z = slot_depth(), x0 = (float)x, y0 = (float)y, x1 = (float)(x + w), y1 = (float)(y + h);
-            if (z <= 0.0f || !vr_move(x0, y0, z, &g_vr_zeye) || !vr_move(x1, y1, z)) return;
-            x = (int)floorf(x0 + 0.5f); y = (int)floorf(y0 + 0.5f);
-            w = std::max(1, (int)floorf(x1 + 0.5f) - x); h = std::max(1, (int)floorf(y1 + 0.5f) - y);
+            float z = slot_depth();
+            qx[0] = qx[2] = (float)x; qx[1] = qx[3] = (float)(x + w);   // top left, top right, bottom left, bottom right
+            qy[0] = qy[1] = (float)y; qy[2] = qy[3] = (float)(y + h);
+            if (z <= 0.0f || !vr_move(qx[0], qy[0], z, &g_vr_zeye)) return;
+            for (int k = 1; k < 4; k++) if (!vr_move(qx[k], qy[k], z)) return;
+            vr_quad = true;
+            x = (int)floorf(qx[0] + 0.5f); y = (int)floorf(qy[0] + 0.5f);
+            w = std::max(1, (int)floorf(qx[3] + 0.5f) - x); h = std::max(1, (int)floorf(qy[3] + 0.5f) - y);
         }
     }
     y += (int)g_st.ys;
@@ -456,8 +474,30 @@ static void draw_rect() {
         if (!tex && !(cmd & 2) && w >= 500 && h == 32 && (scope_now || g_frame - g_scope_seen <= 1)) { g_scope_seen = g_frame; return; }
         if (!tex && (cmd & 2) && w >= 500 && h >= 150 && g_frame - g_scope_seen <= 1) return;
     }
+    if (g_vr_pass == 2 && !tex && w >= 400 && x <= g_st.cx1 && x + w > g_st.cx2 && y <= g_st.cy1 && y + h > g_st.cy2) {
+        // A fade or flash: an untextured rectangle over the whole draw area. On the HUD layer it would only
+        // darken (or whiten) that panel; it is kept to be drawn over each eye's whole picture instead.
+        if (g_vr_fade_n_new < 8) g_vr_fade_new[g_vr_fade_n_new++] = {g_fifo[0] & 0xFFFFFFu, g_st.blend, (cmd & 2) != 0};
+        return;
+    }
     g_prim_depth = prim_depth();
-    g_be->rect(x, y, w, h, uv & 0xFF, (uv >> 8) & 0xFF, g_fifo[0] & 0xFFFFFF, g_st);
+    if (vr_quad) {
+        // Two triangles: the corners keep their fractional positions. Rounded to whole PS1 pixels (several
+        // eye pixels each) a small sprite - the letters of an item's name - lost its height and shifted
+        // sideways from frame to frame.
+        const int u0 = uv & 0xFF, v0 = (uv >> 8) & 0xFF;
+        const int cu[4] = {u0, u0 + src_w, u0, u0 + src_w}, cv[4] = {v0, v0, v0 + src_h, v0 + src_h};
+        GpuVtx q[4] = {};
+        for (int k = 0; k < 4; k++) {
+            q[k].px = qx[k]; q[k].py = qy[k]; q[k].pw = 0.0f;
+            q[k].x = (int)floorf(qx[k] + 0.5f); q[k].y = (int)floorf(qy[k] + 0.5f);
+            q[k].rgb = g_fifo[0] & 0xFFFFFF;
+            q[k].u = cu[k]; q[k].v = cv[k];
+        }
+        g_be->tri(q, g_st);
+        g_be->tri(q + 1, g_st);
+    } else
+        g_be->rect(x, y, w, h, uv & 0xFF, (uv >> 8) & 0xFF, g_fifo[0] & 0xFFFFFF, g_st);
     g_prim_depth = 0.0f;
 }
 
@@ -466,6 +506,7 @@ static int g_dbg_lines, g_dbg_thin;
 int g_laser_beam = 1;   // 0 = mods hide the laser sight's beam (lines), keeping its dot
 static void draw_line_seg(GpuVtx a, GpuVtx b, bool gouraud, bool semi) {
     g_dbg_lines++;
+    if (g_vr_pass == 1 && (abs(a.x - b.x) > 1023 || abs(a.y - b.y) > 511)) return;   // dropped by the console: judged before the eye's view shrinks it
     if (g_vr_pass) {
         GpuVtx e[2] = {a, b};
         if (vr_skip() || (g_vr_pass == 1 && !vr_move_vtx(e, 2))) return;
@@ -477,7 +518,9 @@ static void draw_line_seg(GpuVtx a, GpuVtx b, bool gouraud, bool semi) {
     if (!g_laser_beam && g_list_3d) {
         u32 col = a.rgb;
         int r = col & 0xFF, gc = (col >> 8) & 0xFF, bc = (col >> 16) & 0xFF;
-        if (r > 40 && r > gc * 2 && r > bc * 2) return;
+        // in a headset also the purple ones (red with blue in it): a 1 pixel line is a fat streak at the eye's
+        // resolution, at one flat depth
+        if (r > 40 && r > gc * 2 && (r > bc * 2 || g_vr_active)) return;
     }
     // The scope view's rounded corners are drawn as lines in the front-most slots of the world list.
     if (!g_scope_overlay && g_list_3d && g_ot_index >= 1015 && g_frame - g_scope_seen <= 1) return;
@@ -758,6 +801,9 @@ static double g_rec_world_time;
 static RecList g_rec_world;                       // the newest world list
 static std::vector<RecList> g_rec_hud[2];         // [0] being collected, [1] the last frame's (complete)
 static bool g_rec_have_world;
+static RecList g_rec_icons;                       // the newest list with the menus' item icons (a native scene, not the world)
+static bool g_rec_icons_ok;
+static double g_rec_icons_time;
 static void vr_record(u32 madr, int slots, const FrontState& fs) {
     bool world = false, native = false;
     RecList L;
@@ -792,6 +838,12 @@ static void vr_record(u32 madr, int slots, const FrontState& fs) {
     }
     L.world = world;
     L.native = native;
+    if (native && !world) {   // the menus' item icons (a 3D view of their own): kept, the HUD layer draws the newest
+        g_rec_icons = L;
+        g_rec_icons_ok = true;
+        extern double plat_time();
+        g_rec_icons_time = plat_time();
+    }
     if (world) {
         // a new frame: the HUD collected since the last one is complete
         g_rec_hud[1].swap(g_rec_hud[0]);
@@ -840,8 +892,8 @@ static void vr_replay_list(const RecList& L) {
             g_ot_index = idx;
             if (idx == 1 && L.world && g_vr_pass == 1 && g_vr_xf)
                 level3d_vr_emit(-1.0f, *g_vr_xf, L.fs.st.cx1, L.fs.st.cy1, L.fs.st.cx2, L.fs.st.cy2);
-            if (idx == 1 && L.native && g_vr_pass == 3)   // the whole picture again: its scene blended to now
-                level3d_desktop_emit(L.w[i + 1], g_off_x, g_off_y, g_st.cx1, g_st.cy1, g_st.cx2, g_st.cy2);
+            if (idx == 1 && L.native && (g_vr_pass == 3 || g_vr_icons))   // the whole picture again: its scene blended to now
+                level3d_desktop_emit(L.w[i + 1], g_off_x, g_off_y, g_st.cx1, g_st.cy1, g_st.cx2, g_st.cy2);   // (HUD: the menus' item icons)
         }
         for (u32 k = 0; k < n; k++) gpu_write_gp0(L.w[i + 3 + k]);
         i += 3 + n;
@@ -866,7 +918,7 @@ void gpu_vr_replay(int pass, const VrEyeXf* xf) {
         // the shown picture: the world list, then the lists that drew into the same frame buffer after it
         const GpuState& ws = g_rec_world.fs.st;
         int aw = ws.cx2 - ws.cx1 + 1, ah = ws.cy2 - ws.cy1 + 1;
-        auto buf = [&](const RecList& L) { return std::make_pair(aw > 0 ? L.fs.offx / aw : 0, ah > 0 ? L.fs.offy / ah : 0); };
+        auto buf = [&](const RecList& L) { return std::make_pair(aw > 0 ? L.fs.offx / aw : 0, L.fs.offy / 256); };
         vr_replay_list(g_rec_world);
         for (const RecList& L : g_rec_hud[0])
             if (L.seq > g_rec_world.seq && buf(L) == buf(g_rec_world)) vr_replay_list(L);
@@ -876,12 +928,25 @@ void gpu_vr_replay(int pass, const VrEyeXf* xf) {
         const GpuState& ws = g_rec_world.fs.st;
         int aw = ws.cx2 - ws.cx1 + 1, ah = ws.cy2 - ws.cy1 + 1;
         auto buffer_of = [&](const RecList& L) {
-            int bx = aw > 0 ? (L.fs.offx / aw) * aw : 0, by = ah > 0 ? (L.fs.offy / ah) * ah : 0;
+            // The two frame buffers lie 256 lines apart (y = 0 and 256) whatever the picture's height: the US
+            // build's pictures are 240 lines, so dividing by the picture height put every list of the
+            // second buffer 16 lines too high.
+            int bx = aw > 0 ? (L.fs.offx / aw) * aw : 0, by = (L.fs.offy / 256) * 256;
             hw_xtarget_remap(bx, by, aw, ah);
         };
+        g_vr_fade_n_new = 0;
         for (const RecList& L : g_rec_hud[1]) { buffer_of(L); vr_replay_list(L); }
         buffer_of(g_rec_world);
         vr_replay_list(g_rec_world);
+        extern double plat_time();
+        if (g_rec_icons_ok && plat_time() - g_rec_icons_time < 0.2) {
+            buffer_of(g_rec_icons);
+            g_vr_icons = true;
+            vr_replay_list(g_rec_icons);
+            g_vr_icons = false;
+        }
+        g_vr_fade_n_cur = g_vr_fade_n_new;
+        memcpy(g_vr_fade_cur, g_vr_fade_new, sizeof g_vr_fade_cur);
     }
     if (pass == 3) { g_tf = keep_tf_v; g_sub_window = keep_sub; g_tf_i = 0; }
     g_vr_pass = 0;
@@ -895,6 +960,19 @@ void gpu_vr_replay(int pass, const VrEyeXf* xf) {
     g_stat = keep.stat; g_st = keep.st; g_off_x = keep.offx; g_off_y = keep.offy;
     g_e1 = keep.e[0]; g_e2 = keep.e[1]; g_e3 = keep.e[2]; g_e4 = keep.e[3]; g_e5 = keep.e[4]; g_e6 = keep.e[5];
     g_fifo_n = keep.fifo_n; g_fifo_need = keep.fifo_need; g_poly_line = keep.poly_line; g_xfer_mode = keep.xfer_mode;
+}
+
+// the fades / flashes the HUD pass found, over the whole picture of the bound eye target (the display area ax, ay, aw x ah)
+void gpu_vr_draw_fade(int ax, int ay, int aw, int ah) {
+    for (int i = 0; i < g_vr_fade_n_cur; i++) {
+        GpuState st = {};
+        st.textured = false;
+        st.semi = g_vr_fade_cur[i].semi;
+        st.blend = g_vr_fade_cur[i].blend;
+        st.cx1 = ax; st.cy1 = ay; st.cx2 = ax + aw - 1; st.cy2 = ay + ah - 1;
+        g_prim_depth = 0.0f;
+        g_be->rect(ax, ay, aw, ah, 0, 0, g_vr_fade_cur[i].rgb, st);
+    }
 }
 
 void gpu_dma(u32 madr, u32 bcr, u32 chcr) {

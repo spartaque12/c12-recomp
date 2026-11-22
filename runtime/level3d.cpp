@@ -539,6 +539,9 @@ static void emit_snap(SnapSet& S, float t, const VrEyeXf& xf, int cx1, int cy1, 
         // 25 Hz. Each camera is taken back to the body's own (basis removed), those are blended, and the result
         // is expressed in the newest frame's head-turned camera that the eye placement expects.
         //   eye rotation = T(eye) * T(basis^-1) * R,  T(basis^-1) = C M(basis) C,  T(basis) = C M(basis)^T C
+        // cam.R is S * (true rotation), S the screen stretch (sx, sy, 1). A stretch does not commute with a
+        // rotation, so the head turn can only be taken out of (and put back into) the true rotation: the
+        // stretch is removed first here and applied again to the result below.
         auto body = [](const Capture& f, float out[9]) {
             float m[9];
             const float* q = f.basis;
@@ -547,10 +550,12 @@ static void emit_snap(SnapSet& S, float t, const VrEyeXf& xf, int cx1, int cy1, 
             m[3] = 2 * (x * y + z * w);     m[4] = 1 - 2 * (x * x + z * z); m[5] = 2 * (y * z - x * w);
             m[6] = 2 * (x * z - y * w);     m[7] = 2 * (y * z + x * w);     m[8] = 1 - 2 * (x * x + y * y);
             static const float c[3] = {1, -1, -1};
+            float Rt[9];
+            for (int j = 0; j < 3; j++) { Rt[j] = f.cam.R[j] / f.cam.sx; Rt[3 + j] = f.cam.R[3 + j] / f.cam.sy; Rt[6 + j] = f.cam.R[6 + j]; }
             for (int i = 0; i < 3; i++)
                 for (int j = 0; j < 3; j++) {
                     float s = 0;
-                    for (int k = 0; k < 3; k++) s += c[i] * m[i * 3 + k] * c[k] * f.cam.R[k * 3 + j];
+                    for (int k = 0; k < 3; k++) s += c[i] * m[i * 3 + k] * c[k] * Rt[k * 3 + j];
                     out[i * 3 + j] = s;
                 }
         };
@@ -569,7 +574,7 @@ static void emit_snap(SnapSet& S, float t, const VrEyeXf& xf, int cx1, int cy1, 
             for (int j = 0; j < 3; j++) {
                 float s = 0;
                 for (int k = 0; k < 3; k++) s += c[i] * m[k * 3 + i] * c[k] * b[k * 3 + j];   // C M^T C * body
-                cam.R[i * 3 + j] = s;
+                cam.R[i * 3 + j] = s * (i == 0 ? cam.sx : i == 1 ? cam.sy : 1.0f);   // S * (head turn * body)
             }
     }
     if (mix) {
@@ -655,9 +660,11 @@ bool level3d_desktop_emit(u32 slot_addr, int off_x, int off_y, int cx1, int cy1,
         VrEyeXf xf = {};
         xf.R[0] = xf.R[4] = xf.R[8] = 1.0f;
         float hg = c.cam.h / (g_fov_mult > 0.0f ? g_fov_mult : 1.0f);
-        xf.hx = c.cam.sx * hg * g_ws_scale;
+        // the VR HUD layer (pass 2) keeps the game's own 2D layout: no widescreen widening of the icons
+        const float wss = g_vr_pass == 2 ? 1.0f : g_ws_scale;
+        xf.hx = c.cam.sx * hg * wss;
         xf.hy = c.cam.sy * hg;
-        xf.cx = off_x + c.cam.ofx + (vk ? (1.0f - g_ws_scale) * (256.0f - c.cam.ofx) : 0.0f);
+        xf.cx = off_x + c.cam.ofx + (vk ? (1.0f - wss) * (256.0f - c.cam.ofx) : 0.0f);
         xf.cy = off_y + c.cam.ofy;
         emit_snap(S, -1.0f, xf, cx1, cy1, cx2, cy2, true);
         return true;

@@ -19,7 +19,10 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <math.h>
+#include <stdio.h>
+#include <algorithm>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -166,24 +169,61 @@ float4 ps_hud(V i) : SV_Target {
 }
 )";
 
+    // A render target view on a swapchain image. SteamVR (and Oculus) make the images typeless
+    // (R8G8B8A8_TYPELESS): a view with no description fails on them, so the typed format is named.
+    HRESULT makeRtv(ID3D11Texture2D *tex, bool srgb, ID3D11RenderTargetView **out)
+    {
+        D3D11_TEXTURE2D_DESC d = {};
+        tex->GetDesc(&d);
+        D3D11_RENDER_TARGET_VIEW_DESC rd = {};
+        rd.ViewDimension = d.SampleDesc.Count > 1 ? D3D11_RTV_DIMENSION_TEXTURE2DMS : D3D11_RTV_DIMENSION_TEXTURE2D;
+        switch (d.Format)
+        {
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS: rd.Format = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM; break;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS: rd.Format = srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM; break;
+        default: rd.Format = d.Format; break;
+        }
+        const HRESULT hr = g_dev->CreateRenderTargetView(tex, &rd, out);
+        static bool logged;
+        if (FAILED(hr) && !logged)
+        {
+            logged = true;
+            vr::log("panels: CreateRenderTargetView failed (0x%08x) on a %ux%u image of DXGI format %d (view format %d)\n", (unsigned)hr, d.Width, d.Height, (int)d.Format, (int)rd.Format);
+        }
+        return hr;
+    }
+
+    bool compileShader(const char *entry, const char *target, ID3DBlob **blob)
+    {
+        ID3DBlob *e = nullptr;
+        if (SUCCEEDED(D3DCompile(kShader, strlen(kShader), "vr", nullptr, nullptr, entry, target, 0, 0, blob, &e)))
+        {
+            if (e) e->Release();
+            return true;
+        }
+        vr::log("panels: shader %s did not compile: %s\n", entry, e ? (const char *)e->GetBufferPointer() : "(no message)");
+        if (e) e->Release();
+        return false;
+    }
+
     bool makeShaders()
     {
         if (g_ps_hud)
             return true;
-        ID3DBlob *b = nullptr, *e = nullptr;
-        if (FAILED(D3DCompile(kShader, strlen(kShader), "vr", nullptr, nullptr, "vs", "vs_5_0", 0, 0, &b, &e)))
+        ID3DBlob *b = nullptr;
+        if (!compileShader("vs", "vs_5_0", &b))
             return false;
         g_dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_vs);
         b->Release();
-        if (FAILED(D3DCompile(kShader, strlen(kShader), "vr", nullptr, nullptr, "ps_hud", "ps_5_0", 0, 0, &b, &e)))
+        if (!compileShader("ps_hud", "ps_5_0", &b))
             return false;
         g_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_ps_hud);
         b->Release();
-        if (FAILED(D3DCompile(kShader, strlen(kShader), "vr", nullptr, nullptr, "vs_panel", "vs_5_0", 0, 0, &b, &e)))
+        if (!compileShader("vs_panel", "vs_5_0", &b))
             return false;
         g_dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_vs_panel);
         b->Release();
-        if (FAILED(D3DCompile(kShader, strlen(kShader), "vr", nullptr, nullptr, "ps_panel", "ps_5_0", 0, 0, &b, &e)))
+        if (!compileShader("ps_panel", "ps_5_0", &b))
             return false;
         g_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_ps_panel);
         b->Release();
@@ -257,7 +297,7 @@ float4 ps_hud(V i) : SV_Target {
         cb[32] = srgb ? 1.0f : 0.0f;
         cb[33] = tex1 ? 1.0f : 0.0f;
         ID3D11RenderTargetView *rtv = nullptr;
-        if (FAILED(g_dev->CreateRenderTargetView(dst, nullptr, &rtv)))
+        if (FAILED(makeRtv(dst, srgb, &rtv)))
             return false;
         ID3D11ShaderResourceView *srv[2] = {};
         g_dev->CreateShaderResourceView((ID3D11Texture2D *)tex0, nullptr, &srv[0]);
@@ -297,7 +337,7 @@ float4 ps_hud(V i) : SV_Target {
         if (!dst)
             return nullptr;
         ID3D11RenderTargetView *rtv = nullptr;
-        if (SUCCEEDED(g_dev->CreateRenderTargetView(dst, nullptr, &rtv)))
+        if (SUCCEEDED(makeRtv(dst, srgb, &rtv)))
         {
             const float black[4] = {0, 0, 0, 1};
             g_ctx->ClearRenderTargetView(rtv, black);
@@ -324,7 +364,7 @@ float4 ps_hud(V i) : SV_Target {
             return;
         ID3D11RenderTargetView *rtv = nullptr;
         ID3D11ShaderResourceView *srv[2] = {};
-        if (FAILED(g_dev->CreateRenderTargetView(dst, nullptr, &rtv)))
+        if (FAILED(makeRtv(dst, srgb, &rtv)))
             return;
         g_dev->CreateShaderResourceView((ID3D11Texture2D *)black, nullptr, &srv[0]);
         g_dev->CreateShaderResourceView((ID3D11Texture2D *)white, nullptr, &srv[1]);
@@ -406,14 +446,239 @@ float4 ps_hud(V i) : SV_Target {
         }
     }
 
+    // Precise frame timing for finding stutter: a summary in vr.log every 10 s and, when the environment
+    // variable C12_VR_TIMING_CSV is set, one CSV row per headset frame (vr_timing.csv next to the exe). gpu_ms is the GPU's own time for the eye pictures and HUD
+    // (D3D11 timestamp queries, read a few frames later). Columns:
+    //   t          game clock, seconds
+    //   tick       1 = the game ran its own frame just before this headset frame
+    //   gap_ms     time since the previous headset frame was handed in (the game's work when tick = 1)
+    //   wait_ms    blocked in xrWaitFrame (about 0 = this frame was already late)
+    //   locate_ms  head, views, controller input
+    //   render_ms  vr_render on the CPU (the runtime drawing both eyes + HUD)
+    //   post_ms    HUD / menu screen drawn into the eye pictures, copies
+    //   end_ms     xrEndFrame (blocks when the GPU is behind)
+    //   work_ms    everything from the end of the wait to the end of xrEndFrame
+    //   disp_dt_ms predicted display time minus the previous frame's (one period when no refresh was skipped)
+    //   gpu_ms     GPU time of this frame's work (-1 not available)
+    //   head_dps   head turn speed in degrees per second, yaw / pitch in degrees
+    //   scene      1 stereo view, 2 menu screen, 0 nothing; focused: the app has the headset's input focus
+    namespace prof
+    {
+        struct Row
+        {
+            double t = 0, gap = 0, wait = 0, loc = 0, render = 0, post = 0, end = 0, work = 0, dispDt = 0, gpu = -1, dps = 0, yaw = 0, pitch = 0;
+            int scene = 0, focused = 0, rendered = 0;
+            bool tick = false;
+        };
+        struct Slot
+        {
+            Row row;
+            bool used = false, open = false, q = false;
+            ID3D11Query *dj = nullptr, *a = nullptr, *b = nullptr;
+        };
+        const int kMaxRows = 72000;   // 10 minutes at 120 Hz
+        Slot slots[4];
+        unsigned n = 0;
+        Row cur;
+        Slot *curSlot = nullptr;
+        FILE *csv = nullptr;
+        bool csvTried = false;
+        int rows = 0;
+        std::vector<double> wWork, wWait, wRender, wPost, wEnd, wGpu, wGap, wDps;
+        int wFrames = 0, wTicks = 0, wTickMissed = 0, wMissed = 0;
+        double wT0 = 0;
+        int64_t lastXt = 0;
+        float prevQ[4] = {0, 0, 0, 1};
+        bool prevOk = false;
+
+        std::string pct(std::vector<double> &v)
+        {
+            if (v.empty())
+                return "-";
+            std::sort(v.begin(), v.end());
+            const size_t last = v.size() - 1;
+            char b[96];
+            snprintf(b, sizeof b, "%.1f/%.1f/%.1f/%.1f", v[last / 2], v[std::min(last, (size_t)(v.size() * 0.95))],
+                     v[std::min(last, (size_t)(v.size() * 0.99))], v[last]);
+            return b;
+        }
+
+        void openCsv()
+        {
+            csvTried = true;
+            if (!GetEnvironmentVariableA("C12_VR_TIMING_CSV", nullptr, 0))   // opt-in: the summaries in vr.log are always written
+                return;
+            char path[MAX_PATH] = {};
+            GetModuleFileNameA(nullptr, path, MAX_PATH);
+            char *s = strrchr(path, '\\');
+            if (!s)
+                return;
+            strcpy(s + 1, "vr_timing.csv");
+            csv = fopen(path, "w");
+            if (csv)
+            {
+                fprintf(csv, "t,tick,gap_ms,wait_ms,locate_ms,render_ms,post_ms,end_ms,work_ms,disp_dt_ms,gpu_ms,head_dps,yaw,pitch,scene,focused,rendered\n");
+                vr::log("timing: writing %s\n", path);
+            }
+        }
+
+        void summary(double t)
+        {
+            const float hz = vr::refreshHz();
+            vr::log("timing (%d headset frames, %.0f Hz; ms as median/p95/p99/max):\n", wFrames, hz);
+            vr::log("  work   %s   (wait end of xrWaitFrame -> end of xrEndFrame; budget %.1f)\n", pct(wWork).c_str(), hz > 0 ? 1000.0 / hz : 0.0);
+            vr::log("  wait   %s   render %s   post %s   end %s\n", pct(wWait).c_str(), pct(wRender).c_str(), pct(wPost).c_str(), pct(wEnd).c_str());
+            vr::log("  gpu    %s\n", pct(wGpu).c_str());
+            vr::log("  game ticks %d, game work between headset frames %s; ticks followed by a skipped refresh: %d; skipped refreshes in all: %d\n",
+                    wTicks, pct(wGap).c_str(), wTickMissed, wMissed);
+            double avg = 0, mx = 0;
+            for (double d : wDps) { avg += d; mx = std::max(mx, d); }
+            vr::log("  head speed avg %.0f max %.0f deg/s\n", wDps.empty() ? 0.0 : avg / wDps.size(), mx);
+            if (csv)
+                fflush(csv);
+            wWork.clear(); wWait.clear(); wRender.clear(); wPost.clear(); wEnd.clear(); wGpu.clear(); wGap.clear(); wDps.clear();
+            wFrames = wTicks = wTickMissed = wMissed = 0;
+            wT0 = t;
+        }
+
+        void finalize(Slot &s)
+        {
+            if (!s.used)
+                return;
+            s.used = false;
+            Row r = s.row;
+            if (s.q && g_ctx)
+            {
+                D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {};
+                UINT64 a = 0, b = 0;
+                if (g_ctx->GetData(s.dj, &dj, sizeof dj, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+                    g_ctx->GetData(s.a, &a, sizeof a, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+                    g_ctx->GetData(s.b, &b, sizeof b, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && !dj.Disjoint && dj.Frequency)
+                    r.gpu = (double)(b - a) * 1000.0 / (double)dj.Frequency;
+            }
+            if (!csvTried)
+                openCsv();
+            if (csv && rows < kMaxRows)
+            {
+                fprintf(csv, "%.4f,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.2f,%.2f,%d,%d,%d\n", r.t, r.tick ? 1 : 0, r.gap, r.wait, r.loc,
+                        r.render, r.post, r.end, r.work, r.dispDt, r.gpu, r.dps, r.yaw, r.pitch, r.scene, r.focused, r.rendered);
+                rows++;
+            }
+            const float hz = vr::refreshHz();
+            const bool missed = hz > 0 && r.dispDt > 1500.0 / hz;
+            wFrames++;
+            wWork.push_back(r.work); wWait.push_back(r.wait);
+            if (r.rendered) { wRender.push_back(r.render); wPost.push_back(r.post); }
+            wEnd.push_back(r.end);
+            if (r.gpu >= 0) wGpu.push_back(r.gpu);
+            if (r.tick) { wTicks++; wGap.push_back(r.gap); if (missed) wTickMissed++; }
+            if (missed) wMissed++;
+            if (r.dps > 0) wDps.push_back(r.dps);
+            if (wT0 == 0)
+                wT0 = r.t;
+            if (r.t - wT0 >= 10.0)
+                summary(r.t);
+        }
+
+        void begin(double entryT, double gapMs)
+        {
+            curSlot = &slots[n % 4];
+            finalize(*curSlot);
+            cur = Row();
+            cur.t = entryT;
+            cur.gap = gapMs;
+            cur.tick = gapMs > 1.5;
+        }
+
+        void gpuBegin()
+        {
+            Slot &s = *curSlot;
+            s.q = false;
+            if (!g_dev || !g_ctx)
+                return;
+            if (!s.dj)
+            {
+                D3D11_QUERY_DESC d = {};
+                d.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+                g_dev->CreateQuery(&d, &s.dj);
+                d.Query = D3D11_QUERY_TIMESTAMP;
+                g_dev->CreateQuery(&d, &s.a);
+                g_dev->CreateQuery(&d, &s.b);
+            }
+            if (!s.dj || !s.a || !s.b)
+                return;
+            g_ctx->Begin(s.dj);
+            g_ctx->End(s.a);
+            s.open = true;
+        }
+
+        void gpuEnd()
+        {
+            Slot &s = *curSlot;
+            if (!s.open)
+                return;
+            g_ctx->End(s.b);
+            g_ctx->End(s.dj);
+            s.open = false;
+            s.q = true;
+        }
+
+        void head(const vr::Pose &h, int64_t xt)
+        {
+            const float *q = h.q;
+            const float fx = -2.0f * (q[0] * q[2] + q[1] * q[3]), fy = -2.0f * (q[1] * q[2] - q[0] * q[3]), fz = -(1.0f - 2.0f * (q[0] * q[0] + q[1] * q[1]));
+            cur.yaw = atan2f(-fx, -fz) * 57.29578f;
+            cur.pitch = atan2f(fy, sqrtf(fx * fx + fz * fz)) * 57.29578f;
+            if (xt && lastXt)
+                cur.dispDt = (xt - lastXt) * 1e-6;
+            if (prevOk && xt > lastXt && lastXt)
+            {
+                float dot = fabsf(prevQ[0] * q[0] + prevQ[1] * q[1] + prevQ[2] * q[2] + prevQ[3] * q[3]);
+                if (dot > 1.0f) dot = 1.0f;
+                cur.dps = 2.0 * acos((double)dot) * 57.29578 / ((xt - lastXt) * 1e-9);
+            }
+            if (xt != lastXt)
+            {
+                memcpy(prevQ, q, sizeof prevQ);
+                prevOk = true;
+                lastXt = xt;
+            }
+        }
+
+        void commit()
+        {
+            gpuEnd();
+            curSlot->row = cur;
+            curSlot->used = true;
+            n++;
+        }
+
+        void close()
+        {
+            for (int i = 0; i < 4; i++)
+                finalize(slots[(n + i) % 4]);
+            if (csv)
+            {
+                fclose(csv);
+                csv = nullptr;
+            }
+            csvTried = false;
+            rows = 0;
+        }
+    }
+
     // One headset frame. Returns false when no frame could be made (session not running).
     bool frame()
     {
         vr::poll();
         if (!vr::running())
             return false;
+        const double tEntry = g_api->time_now();
         if (!vr::waitAndBegin())
             return false;
+        const double tWaited = g_api->time_now();
+        prof::begin(tEntry, g_frame_end_t > 0 ? (tEntry - g_frame_end_t) * 1000.0 : 0.0);
+        prof::cur.wait = (tWaited - tEntry) * 1000.0;
         if (g_need_recentre) { vr::recenter(); g_need_recentre = false; }
         vr::View views[2];
         vr::Pose head;
@@ -422,9 +687,14 @@ float4 ps_hud(V i) : SV_Target {
         double dt = g_last_frame_t > 0 ? now - g_last_frame_t : 0.011;
         g_last_frame_t = now;
         displayTime(now);
+        if (haveViews)
+            prof::head(head, vr::predictedDisplayTime());
         vr::Hand hd[2];
         if (vr::syncInput(hd)) { controls(hd, dt); hands(hd); }
         else { g_api->set_aim_ray(0, nullptr, nullptr); g_api->vr_set_beam(0, nullptr, 0, 0); g_api->vr_set_hand(0, nullptr); g_api->vr_set_hand(1, nullptr); }
+        prof::cur.focused = vr::focused() ? 1 : 0;
+        prof::cur.loc = (g_api->time_now() - tWaited) * 1000.0;
+        double tRendered = 0;
         vr::ProjectionLayer proj;
         vr::QuadLayer quads[2];
         int nq = 0;
@@ -450,7 +720,13 @@ float4 ps_hud(V i) : SV_Target {
             if (w < 64) w = 64;
             if (h < 64) h = 64;
             C12VrImages img;
+            const double tR0 = g_api->time_now();
+            prof::gpuBegin();
             int scene = g_api->vr_render(ev, g_units_per_m, w, h, &img);
+            tRendered = g_api->time_now();
+            prof::cur.rendered = 1;
+            prof::cur.render = (tRendered - tR0) * 1000.0;
+            prof::cur.scene = scene ? 1 : img.cinema ? 2 : 0;
             if (scene)
             {
                 copyInto(vr::Panel::Scene, img.eye[0], img.eye_w, img.eye_h);
@@ -510,8 +786,15 @@ float4 ps_hud(V i) : SV_Target {
                 }
             }
         }
+        const double tE0 = g_api->time_now();
+        if (tRendered > 0)
+            prof::cur.post = (tE0 - tRendered) * 1000.0;
+        prof::gpuEnd();
         vr::endFrame(proj, quads, nq);
         g_frame_end_t = g_api->time_now();
+        prof::cur.end = (g_frame_end_t - tE0) * 1000.0;
+        prof::cur.work = (g_frame_end_t - tWaited) * 1000.0;
+        prof::commit();
         return true;
     }
 
@@ -549,6 +832,7 @@ float4 ps_hud(V i) : SV_Target {
         g_api->vr_set_beam(0, nullptr, 0, 0);
         g_api->vr_set_hand(0, nullptr);
         g_api->vr_set_hand(1, nullptr);
+        prof::close();
         vr::stop();
         g_on = false;
         vr::log("VR off\n");

@@ -30,6 +30,8 @@ bool gpu_vr_have_world();
 // (pass 2). Returns the display area (VRAM rectangle) the world list draws into.
 bool gpu_vr_world_area(int& x, int& y, int& w, int& h, int& off_x, int& off_y);
 void gpu_vr_replay(int pass, const VrEyeXf* xf);
+// fades and flashes (full-screen rectangles of the HUD lists) over the whole picture of the eye target being drawn
+void gpu_vr_draw_fade(int x, int y, int w, int h);
 
 // level3d.cpp
 struct VrCamInfo { float h, ofx, ofy, sx, sy; float basis[4]; float R[9], eye[3]; };   // R: world -> view (stretched)   // game projection, stretch, head basis used
